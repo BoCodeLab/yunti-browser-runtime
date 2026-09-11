@@ -5,6 +5,18 @@ import { fileURLToPath } from "node:url"
 import { spawnSync } from "node:child_process"
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..")
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm"
+
+function portablePath(value) {
+  return String(value || "").replace(/\\/g, "/")
+}
+
+function spawnNpm(args, options) {
+  if (process.env.npm_execpath) {
+    return spawnSync(process.execPath, [process.env.npm_execpath, ...args], options)
+  }
+  return spawnSync(npmCommand, args, { ...options, shell: process.platform === "win32" })
+}
 const residueTerms = ["/Users", "Codeg", "xyy", "ybm100"]
 const residueRoots = ["README.md", "docs", "skills", "package.json"]
 const requiredExtensionZipFiles = [
@@ -270,10 +282,10 @@ function checkPrintConfigSmoke() {
       payload?.agent !== agent ||
       server?.command !== "node" ||
       !Array.isArray(server?.args) ||
-      !server.args[0]?.endsWith("mcp/server.js") ||
+      !portablePath(server.args[0]).endsWith("mcp/server.js") ||
       env.YUNTI_BROWSER_BRIDGE_PORT !== "48887" ||
       payload?.bridge?.tokenEnv !== "YUNTI_BROWSER_BRIDGE_TOKEN" ||
-      !String(payload?.skill?.sourcePath || "").endsWith("skills/yunti-browser-runtime") ||
+      !portablePath(payload?.skill?.sourcePath).endsWith("skills/yunti-browser-runtime") ||
       (agent === "codex" &&
         (!String(payload?.skill?.installCommand || "").includes("~/.codex/skills") ||
           !String(payload?.skill?.installCommand || "").includes(payload.skill.sourcePath)))
@@ -302,7 +314,7 @@ function checkPrintConfigSmoke() {
     !human.stdout.includes("Skill source:") ||
     !human.stdout.includes("Skill install:") ||
     !human.stdout.includes("~/.codex/skills") ||
-    !human.stdout.includes("skills/yunti-browser-runtime")
+    !portablePath(human.stdout).includes("skills/yunti-browser-runtime")
   ) {
     console.error("print-config smoke check failed:")
     console.error(`- human exit code: ${human.status}`)
@@ -340,9 +352,9 @@ function checkDoctorSmoke() {
     checks.node?.ok !== true ||
     checks.node?.required !== ">=22" ||
     checks.mcpServer?.ok !== true ||
-    !String(checks.mcpServer?.path || "").endsWith("mcp/server.js") ||
+    !portablePath(checks.mcpServer?.path).endsWith("mcp/server.js") ||
     checks.skill?.ok !== true ||
-    !String(checks.skill?.path || "").endsWith("skills/yunti-browser-runtime/SKILL.md") ||
+    !portablePath(checks.skill?.path).endsWith("skills/yunti-browser-runtime/SKILL.md") ||
     typeof checks.bridge?.reachable !== "boolean" ||
     checks.bridge?.tokenHeader !== "x-yunti-browser-token" ||
     !Array.isArray(payload?.nextSteps)
@@ -360,11 +372,13 @@ function checkDoctorSmoke() {
 
 function run(command, args) {
   console.error(`\n$ ${[command, ...args].join(" ")}`)
-  const result = spawnSync(command, args, {
+  const options = {
     cwd: rootDir,
     stdio: "inherit",
     env: process.env,
-  })
+  }
+  const result = command === "npm" ? spawnNpm(args, options) : spawnSync(command, args, options)
+  if (result.error) console.error(result.error.message)
   return result.status === 0
 }
 
@@ -395,7 +409,7 @@ function checkPackageContents() {
   ]
 
   console.error("\n$ npm pack --json --dry-run")
-  const result = spawnSync("npm", ["pack", "--json", "--dry-run"], {
+  const result = spawnNpm(["pack", "--json", "--dry-run"], {
     cwd: rootDir,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
@@ -411,7 +425,7 @@ function checkPackageContents() {
     return false
   }
 
-  const pack = Array.isArray(payload) ? payload[0] : null
+  const pack = Array.isArray(payload) ? payload[0] : payload?.[readJsonFile("package.json").name]
   const packedFiles = new Set(
     Array.isArray(pack?.files) ? pack.files.map((file) => file.path) : []
   )

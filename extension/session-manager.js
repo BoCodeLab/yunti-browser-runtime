@@ -43,6 +43,7 @@ export function createSessionManager(options = {}) {
   let browserControllerIdPromise = null
   let cachedPlatformMatches = null
   let toolRequestHandler = null
+  let stopped = false
 
   function getPlatformMatches() {
     return cachedPlatformMatches
@@ -65,11 +66,13 @@ export function createSessionManager(options = {}) {
   }
 
   async function registerBrowserController(reason = "heartbeat") {
+    if (stopped) return { ok: false, reason: "stopped" }
     const settings = await getSettings()
     cachedPlatformMatches = settings.platformMatches
     const browserSessionId = await getBrowserControllerId()
     const browserInstanceId = browserSessionId
     const liveTabIds = await currentLiveTabIds()
+    if (stopped) return { ok: false, reason: "stopped" }
     const session = {
       browserSessionId,
       kind: "browser_controller",
@@ -130,6 +133,7 @@ export function createSessionManager(options = {}) {
   }
 
   function startControllerPolling(session, settings) {
+    if (stopped) return
     const routeKey = `${settings.bridgeUrl}|${session.browserSessionId}`
     const pollerIsResponsive =
       controllerPoller &&
@@ -148,9 +152,11 @@ export function createSessionManager(options = {}) {
       while (!controller.signal.aborted) {
         try {
           const liveTabIds = await currentLiveTabIds()
+          if (controller.signal.aborted) break
           if (controllerSession) controllerSession.liveTabIds = liveTabIds
           await postBridge("/sessions/register", controllerSession || session).catch(() => null)
           const settings = await getSettings()
+          if (controller.signal.aborted) break
           cachedPlatformMatches = settings.platformMatches
           const currentRouteKey = `${settings.bridgeUrl}|${session.browserSessionId}`
           if (currentRouteKey !== controllerPollerRoute) {
@@ -189,10 +195,18 @@ export function createSessionManager(options = {}) {
     controllerToolQueue = controllerToolQueue
       .catch(() => {})
       .then(async () => {
+        if (stopped) return
         try {
+          if (Number.isFinite(Number(event.deadlineAt)) && Number(event.deadlineAt) <= Date.now()) {
+            throw new Error(`Browser tool request timed out before execution: ${event.tool || "unknown"}`)
+          }
+          const deadlineAt = Number(event.deadlineAt)
+          const remainingMs = Number.isFinite(deadlineAt)
+            ? deadlineAt - Date.now()
+            : controllerToolTimeoutMs
           await withTimeout(
             toolRequestHandler(null, session, event),
-            controllerToolTimeoutMs,
+            Math.min(controllerToolTimeoutMs, remainingMs),
             `Browser tool execution timed out inside the extension: ${event.tool || "unknown"}`
           )
         } catch (error) {
@@ -582,6 +596,14 @@ export function createSessionManager(options = {}) {
     return getPanelState()
   }
 
+  function stop() {
+    stopped = true
+    controllerPoller?.abort()
+    controllerPoller = null
+    controllerPollerRoute = ""
+    controllerSession = null
+  }
+
   return {
     sessionsByTab,
     activateTab,
@@ -594,6 +616,7 @@ export function createSessionManager(options = {}) {
     postBridge,
     registerBrowserController,
     setToolRequestHandler,
+    stop,
   }
 }
 

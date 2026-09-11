@@ -141,6 +141,40 @@ const cdpResponses = options.cdpResponses ? [...options.cdpResponses] : null
   }
 }
 
+test("AX snapshot uids resolve their live backend node before clicking", async () => {
+  const harness = createDispatcherHarness({ cdpResponses: [
+    { nodes: [{ nodeId: "1", backendDOMNodeId: 7, role: { value: "button" }, name: { value: "Submit" } }] },
+    {},
+    { model: { content: [10, 20, 110, 20, 110, 60, 10, 60] } },
+  ] })
+  try {
+    const session = { browserSessionId: "tab-ax", tabId: 123, kind: "page" }
+    await harness.dispatcher.executeToolRequest(123, session, { id: "snapshot", tool: "yunti_take_snapshot", arguments: {} })
+    const uid = harness.posted.at(-1).result.elements[0].uid
+    await harness.dispatcher.executeToolRequest(123, session, { id: "click", tool: "yunti_click", arguments: { uid } })
+    assert.equal(harness.posted.at(-1).result.clicked, true)
+    assert.deepEqual(harness.cdpCommands.at(-1), { method: "DOM.getBoxModel", params: { backendNodeId: 7 } })
+    assert.equal(harness.sentMessages.at(-1).message.arguments.x, 60)
+    assert.equal(harness.sentMessages.at(-1).message.arguments.y, 40)
+  } finally {
+    harness.restore()
+  }
+})
+
+test("expired requests fail before resolving or acting on a page", async () => {
+  const harness = createDispatcherHarness()
+  try {
+    await harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, {
+      id: "expired", tool: "yunti_click", arguments: { selector: "#submit" }, deadlineAt: Date.now() - 1,
+    })
+    assert.equal(harness.posted.at(-1).ok, false)
+    assert.match(harness.posted.at(-1).error, /timed out/i)
+    assert.equal(harness.sentMessages.length, 0)
+  } finally {
+    harness.restore()
+  }
+})
+
 test("controller transport resolves a concrete page before dispatching page tools", async () => {
   const harness = createDispatcherHarness({
     observations: [{

@@ -9,6 +9,7 @@ import { handleJsonRpc, startBridgeServer } from "../mcp/server.js"
 import packageJson from "../package.json" with { type: "json" }
 
 const runE2e = process.env.YUNTI_E2E === "1"
+const headless = process.env.YUNTI_E2E_HEADLESS === "1"
 const e2eExecutablePath = String(process.env.YUNTI_E2E_EXECUTABLE_PATH || "").trim()
 const secondE2eExecutablePath = String(
   process.env.YUNTI_E2E_SECOND_EXECUTABLE_PATH || ""
@@ -17,8 +18,7 @@ const rootDir = resolve(fileURLToPath(new URL("..", import.meta.url)))
 const extensionDir = join(rootDir, "extension")
 
 test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_E2E=1 to run real-browser smoke test" }, async (t) => {
-  const playwright = await loadPlaywright(t)
-  if (!playwright) return
+  const playwright = await loadPlaywright()
 
   const artifactDir = await mkdtemp(join(tmpdir(), "yunti-browser-e2e-"))
   const bridge = await startBridgeServer({
@@ -40,7 +40,7 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
 
   try {
     context = await playwright.chromium.launchPersistentContext(userDataDir, {
-      headless: false,
+      headless,
       ...(e2eExecutablePath ? { executablePath: e2eExecutablePath } : {}),
       args: [
         `--disable-extensions-except=${extensionDir}`,
@@ -84,7 +84,7 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
 
     if (secondE2eExecutablePath) {
       secondContext = await playwright.chromium.launchPersistentContext(secondUserDataDir, {
-        headless: false,
+        headless,
         executablePath: secondE2eExecutablePath,
         args: [
           `--disable-extensions-except=${extensionDir}`,
@@ -184,6 +184,18 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
         "JSON.stringify({ value: document.querySelector('#name').value, clicked: window.__clicked || 0 })",
     })
     assert.deepEqual(JSON.parse(evaluated.value), { value: "Yunti", clicked: 1 })
+
+    const axSnapshot = await callTool(bridge, "yunti_take_snapshot", { browserSessionId })
+    const axButton = axSnapshot.elements.find((element) => element.role === "button" && element.name === "Click me")
+    assert.ok(axButton?.backendNodeId)
+    const axClick = await callTool(bridge, "yunti_click", { browserSessionId, uid: axButton.uid })
+    assert.equal(axClick.clicked, true)
+    const afterAxClick = await callTool(bridge, "yunti_evaluate_script", {
+      browserSessionId,
+      expression: "window.__clicked",
+    })
+    assert.equal(afterAxClick.value, 2)
+    await rm(artifactDir, { recursive: true, force: true })
   } catch (error) {
     if (page) {
       await page.screenshot({ path: join(artifactDir, "failure.png"), fullPage: true }).catch(() => {})
@@ -211,12 +223,11 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
   }
 })
 
-async function loadPlaywright(t) {
+async function loadPlaywright() {
   try {
-    return await import("playwright")
+    return await import("playwright-core")
   } catch {
-    t.skip("install Playwright and Chromium before running YUNTI_E2E=1 npm run test:e2e")
-    return null
+    throw new Error("Real-browser E2E requires the declared playwright-core dependency. Install dependencies before enabling YUNTI_E2E.")
   }
 }
 

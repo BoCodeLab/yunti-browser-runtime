@@ -1009,11 +1009,13 @@ export class BridgeHub {
         recoveredStaleRoute: Boolean(route.recoveredStaleRoute),
       },
       createdAt: new Date().toISOString(),
+      deadlineAt: Date.now() + timeoutMs,
     }
 
     const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(requestId)
+        session.queue = session.queue.filter((request) => request.id !== requestId)
         this.recordActivity({
           type: "tool-result",
           tool,
@@ -1279,13 +1281,13 @@ export class BridgeHub {
     }
     this.refreshSession(session)
     if (isBrowserControllerSession(session)) {
-      this.refreshPageSessionsForUser(
-        session.meta?.userId,
-        Date.now(),
-        session.meta?.liveTabIds
-      )
+      this.refreshPageSessionsForController(session)
     }
-    if (session.queue.length > 0) return session.queue.shift()
+    if (signal?.aborted) return { type: "noop", id: randomUUID(), aborted: true }
+    while (session.queue.length > 0) {
+      const request = session.queue.shift()
+      if (this.pendingRequests.has(request.id) && request.deadlineAt > Date.now()) return request
+    }
 
     return new Promise((resolve) => {
       let settled = false

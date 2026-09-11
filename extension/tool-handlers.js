@@ -30,6 +30,9 @@ export function createToolDispatcher({
     let ok = true
     let error = null
     try {
+      if (Number.isFinite(Number(event?.deadlineAt)) && Number(event.deadlineAt) <= Date.now()) {
+        throw new Error(`Browser tool request timed out before execution: ${event.tool || "unknown"}`)
+      }
       const route = await resolveToolPageRoute(tabId, session, event)
       tabId = route.tabId
       session = route.session
@@ -647,8 +650,12 @@ export function createToolDispatcher({
   async function clickByUid(tabId, session, args = {}) {
     const uid = String(args.uid || "").trim()
     if (uid) {
-      const point = resolveObservedUidCenter(session, uid)
-      if (!point.ok) return buildUidPointFailureResult(session, uid, "click", point.error)
+      let point
+      try {
+        point = await resolveUidCenter(tabId, session, uid)
+      } catch (error) {
+        return buildUidPointFailureResult(session, uid, "click", error?.message || String(error))
+      }
       const result = await chrome.tabs.sendMessage(tabId, {
         type: "yunti_execute_tool",
         tool: "yunti_click",
@@ -732,8 +739,12 @@ export function createToolDispatcher({
   async function hoverByUid(tabId, session, args = {}) {
     const uid = String(args.uid || "").trim()
     if (uid) {
-      const point = resolveObservedUidCenter(session, uid)
-      if (!point.ok) return buildUidPointFailureResult(session, uid, "hover", point.error)
+      let point
+      try {
+        point = await resolveUidCenter(tabId, session, uid)
+      } catch (error) {
+        return buildUidPointFailureResult(session, uid, "hover", error?.message || String(error))
+      }
       const result = await chrome.tabs.sendMessage(tabId, {
         type: "yunti_execute_tool",
         tool: "yunti_hover",
@@ -822,11 +833,13 @@ export function createToolDispatcher({
     const value = String(args.value)
     if (uid) {
       try {
-        const point = resolveObservedUidCenter(session, uid)
-        if (!point.ok) {
+        let point
+        try {
+          point = await resolveUidCenter(tabId, session, uid)
+        } catch (error) {
           return buildUidFillFailureResult(session, uid, {
             code: "UID_COORDINATES_UNAVAILABLE",
-            error: point.error,
+            error: error?.message || String(error),
           })
         }
         const result = await chrome.tabs.sendMessage(tabId, {
@@ -1268,11 +1281,13 @@ export function createToolDispatcher({
     if (uid) {
       const matchMode = text ? "text" : "value"
       const targetOption = text || value
-      const point = resolveObservedUidCenter(session, uid)
-      if (!point.ok) {
+      let point
+      try {
+        point = await resolveUidCenter(tabId, session, uid)
+      } catch (error) {
         return buildUidSelectFailureResult(session, uid, matchMode, targetOption, {
           code: "UID_COORDINATES_UNAVAILABLE",
-          error: point.error,
+          error: error?.message || String(error),
         })
       }
       const selectResult = await chrome.tabs.sendMessage(tabId, {
@@ -1595,8 +1610,34 @@ export function createToolDispatcher({
   
   async function resolveUidCenter(tabId, session, uid) {
     const point = resolveObservedUidCenter(session, uid)
-    if (point.ok) return { x: point.x, y: point.y }
-    throw new Error(point.error)
+    if (!point.ok) throw new Error(point.error)
+    if (point.x !== undefined && point.y !== undefined) return { x: point.x, y: point.y }
+
+    const node = point.element
+    if (!node?.backendNodeId && !node?.nodeId) {
+      throw new Error(
+        `Cannot resolve coordinates for uid ${uid}. Run yunti_observe_page with includeRects enabled or use an explicit selector fallback.`
+      )
+    }
+    await ensureCdpAttached(tabId, "1.3")
+    const nodeRef = node.backendNodeId
+      ? { backendNodeId: node.backendNodeId }
+      : { nodeId: node.nodeId }
+    await chromeDebuggerSendCommand({ tabId }, "DOM.scrollIntoViewIfNeeded", nodeRef).catch(() => {})
+    const box = await chromeDebuggerSendCommand({ tabId }, "DOM.getBoxModel", nodeRef)
+    const quad = box?.model?.border || box?.model?.content || box?.model?.padding
+    if (!Array.isArray(quad) || quad.length < 8) {
+      throw new Error(`CDP did not return a usable box model for uid ${uid}`)
+    }
+    const xs = quad.filter((_value, index) => index % 2 === 0).map(Number)
+    const ys = quad.filter((_value, index) => index % 2 === 1).map(Number)
+    if (!xs.every(Number.isFinite) || !ys.every(Number.isFinite)) {
+      throw new Error(`CDP returned invalid coordinates for uid ${uid}`)
+    }
+    return {
+      x: (Math.min(...xs) + Math.max(...xs)) / 2,
+      y: (Math.min(...ys) + Math.max(...ys)) / 2,
+    }
   }
 
   function resolveObservedUidCenter(session, uid) {
@@ -1609,7 +1650,7 @@ export function createToolDispatcher({
       }
     }
     const el = uidMap[uid]
-  
+    if (el.backendNodeId || el.nodeId) return { ok: true, element: el }
     if (el.rect && el.rect.width > 0 && el.rect.height > 0) {
       return {
         ok: true,
@@ -1617,10 +1658,9 @@ export function createToolDispatcher({
         y: el.rect.y + el.rect.height / 2,
       }
     }
-
     return {
       ok: false,
-      error: `Cannot resolve coordinates for uid ${uid} without Chrome debugger. Run yunti_observe_page with includeRects enabled, scroll the element into view, or use an explicit selector fallback.`,
+      error: `Cannot resolve coordinates for uid ${uid}. Run yunti_observe_page with includeRects enabled, scroll the element into view, or use an explicit selector fallback.`,
     }
   }
 
@@ -2190,8 +2230,12 @@ export function createToolDispatcher({
     const text = String(args.text || "")
     if (!text) throw new Error("text is required")
   
-    const point = resolveObservedUidCenter(session, uid)
-    if (!point.ok) return buildUidPointFailureResult(session, uid, "type", point.error)
+    let point
+    try {
+      point = await resolveUidCenter(tabId, session, uid)
+    } catch (error) {
+      return buildUidPointFailureResult(session, uid, "type", error?.message || String(error))
+    }
     const result = await chrome.tabs.sendMessage(tabId, {
       type: "yunti_execute_tool",
       tool: "yunti_type_text",
@@ -2251,8 +2295,12 @@ export function createToolDispatcher({
     const key = String(args.key || "").trim()
     if (!key) throw new Error("key is required")
   
-    const point = resolveObservedUidCenter(session, uid)
-    if (!point.ok) return buildUidPointFailureResult(session, uid, "press", point.error)
+    let point
+    try {
+      point = await resolveUidCenter(tabId, session, uid)
+    } catch (error) {
+      return buildUidPointFailureResult(session, uid, "press", error?.message || String(error))
+    }
     const result = await chrome.tabs.sendMessage(tabId, {
       type: "yunti_execute_tool",
       tool: "yunti_press_key",

@@ -1,6 +1,14 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { createSessionManager } from "../extension/session-manager.js"
+import { createSessionManager as createRuntimeSessionManager } from "../extension/session-manager.js"
+
+const testManagers = new Set()
+
+function createSessionManager(options) {
+  const manager = createRuntimeSessionManager(options)
+  testManagers.add(manager)
+  return manager
+}
 
 function installChromeMock(options = {}) {
   const tabs = options.tabs || []
@@ -112,6 +120,8 @@ function installChromeMock(options = {}) {
     styles,
     updatedTabs,
     restore() {
+      for (const manager of testManagers) manager.stop()
+      testManagers.clear()
       globalThis.chrome = previousChrome
       globalThis.fetch = previousFetch
     },
@@ -264,6 +274,32 @@ test("controller polling continues while a browser tool is still executing", asy
     )
     assert.equal(timeoutResult?.body.ok, false)
     assert.match(timeoutResult?.body.error || "", /timed out inside the extension/)
+  } finally {
+    mock.restore()
+  }
+})
+
+test("controller drops a browser request whose bridge deadline has expired", async () => {
+  const mock = installChromeMock({
+    pollEvents: [{
+      type: "tool_request",
+      id: "expired-controller-request",
+      tool: "yunti_click",
+      deadlineAt: Date.now() - 1,
+    }],
+  })
+  try {
+    const manager = createSessionManager()
+    manager.setToolRequestHandler(async () => {
+      throw new Error("handler should not run for an expired request")
+    })
+    await manager.registerBrowserController("expired_request")
+    await new Promise((resolve) => setImmediate(resolve))
+    const result = mock.requests.find((request) =>
+      request.url.endsWith("/extension/result") && request.body.requestId === "expired-controller-request"
+    )
+    assert.equal(result?.body.ok, false)
+    assert.match(result?.body.error || "", /timed out before execution/i)
   } finally {
     mock.restore()
   }

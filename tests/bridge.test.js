@@ -2,6 +2,9 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { createRequire } from "node:module"
 import { createServer } from "node:http"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { rm } from "node:fs/promises"
 import {
   BRIDGE_TOKEN_HEADER,
   BridgeHub,
@@ -74,6 +77,43 @@ test("bridge routes a tool request to the registered browser session", async () 
 
   assert.equal(outcome.accepted, true)
   assert.deepEqual(await call, { title: "Yunti" })
+})
+
+test("controller polls preserve pages in other browsers with different tab inventories", async () => {
+  const hub = new BridgeHub()
+  for (const [id, tabId] of [["a", 101], ["b", 202]]) {
+    hub.registerSession({
+      browserSessionId: `controller-${id}`, browserInstanceId: id, userId: "local",
+      kind: "browser_controller", liveTabIds: [tabId],
+    })
+    hub.registerSession({
+      browserSessionId: `page-${id}`, browserInstanceId: id, userId: "local",
+      browserControllerSessionId: `controller-${id}`, tabId,
+    })
+  }
+  for (const id of ["a", "b"]) {
+    const abort = new AbortController()
+    const poll = hub.poll(`controller-${id}`, 1000, abort.signal)
+    abort.abort()
+    await poll
+    assert.ok(hub.sessions.has("page-a"))
+    assert.ok(hub.sessions.has("page-b"))
+  }
+})
+
+test("expired queued writes are never delivered to a later controller poll", async () => {
+  const hub = new BridgeHub()
+  hub.registerSession({ browserSessionId: "page", userId: "local" })
+  await assert.rejects(hub.callTool("yunti_click", {
+    browserSessionId: "page", userId: "local", selector: "#submit",
+  }, 10), /Timed out/)
+  assert.equal(hub.sessions.get("page").queue.length, 0)
+  const call = hub.callTool("yunti_observe_page", { browserSessionId: "page", userId: "local" }, 1000)
+  const event = await hub.poll("page")
+  assert.equal(event.tool, "yunti_observe_page")
+  assert.ok(event.deadlineAt > Date.now())
+  hub.submitResult({ browserSessionId: "page", requestId: event.id, ok: true, result: {} })
+  await call
 })
 
 test("bridge HTTP routes require the configured token", async () => {
@@ -1506,12 +1546,13 @@ test("bridge stores raw CDP events separately from sanitized network observation
   assert.equal(hub.listCdpEvents({ browserSessionId: "tab-1", userId: "u1" }).returned, 0)
 })
 
-test("learning memory can be written and searched", async () => {
+test("learning memory can be written and searched", async (t) => {
   const previousHome = process.env.YUNTI_HOME
   const previousDataDir = process.env.YUNTI_BROWSER_DATA_DIR
   const tempDir = await import("node:fs/promises").then((fs) =>
-    fs.mkdtemp(new URL("yunti-browser-runtime-test-", "file:///tmp/"))
+    fs.mkdtemp(join(tmpdir(), "yunti-browser-runtime-test-"))
   )
+  t.after(() => rm(tempDir, { recursive: true, force: true }))
   process.env.YUNTI_HOME = tempDir
   delete process.env.YUNTI_BROWSER_DATA_DIR
   try {
@@ -1572,12 +1613,13 @@ test("learning memory can be written and searched", async () => {
   }
 })
 
-test("learning memory redacts secrets and PII-like values before storage", async () => {
+test("learning memory redacts secrets and PII-like values before storage", async (t) => {
   const previousHome = process.env.YUNTI_HOME
   const previousDataDir = process.env.YUNTI_BROWSER_DATA_DIR
   const tempDir = await import("node:fs/promises").then((fs) =>
-    fs.mkdtemp(new URL("yunti-memory-redaction-test-", "file:///tmp/"))
+    fs.mkdtemp(join(tmpdir(), "yunti-memory-redaction-test-"))
   )
+  t.after(() => rm(tempDir, { recursive: true, force: true }))
   process.env.YUNTI_HOME = tempDir
   delete process.env.YUNTI_BROWSER_DATA_DIR
   try {
@@ -1634,12 +1676,13 @@ test("learning memory redacts secrets and PII-like values before storage", async
   }
 })
 
-test("learning memory uses the default local user scope", async () => {
+test("learning memory uses the default local user scope", async (t) => {
   const previousHome = process.env.YUNTI_HOME
   const previousDataDir = process.env.YUNTI_BROWSER_DATA_DIR
   const tempDir = await import("node:fs/promises").then((fs) =>
-    fs.mkdtemp(new URL("yunti-agent-home-test-", "file:///tmp/"))
+    fs.mkdtemp(join(tmpdir(), "yunti-agent-home-test-"))
   )
+  t.after(() => rm(tempDir, { recursive: true, force: true }))
   try {
     process.env.YUNTI_HOME = tempDir
     delete process.env.YUNTI_BROWSER_DATA_DIR
@@ -1669,12 +1712,13 @@ test("learning memory uses the default local user scope", async () => {
   }
 })
 
-test("default learning memory lives under Yunti agent home", async () => {
+test("default learning memory lives under Yunti agent home", async (t) => {
   const previousHome = process.env.YUNTI_HOME
   const previousDataDir = process.env.YUNTI_BROWSER_DATA_DIR
   const tempDir = await import("node:fs/promises").then((fs) =>
-    fs.mkdtemp(new URL("yunti-agent-home-test-", "file:///tmp/"))
+    fs.mkdtemp(join(tmpdir(), "yunti-agent-home-test-"))
   )
+  t.after(() => rm(tempDir, { recursive: true, force: true }))
   process.env.YUNTI_HOME = tempDir
   delete process.env.YUNTI_BROWSER_DATA_DIR
   try {
@@ -1712,7 +1756,7 @@ test("default learning memory lives under Yunti agent home", async () => {
     assert.equal(search.result.structuredContent.returned, 1)
     assert.equal(
       search.result.structuredContent.storagePath,
-      `${tempDir}/users/u-default/memory/learning-memory.json`
+      join(tempDir, "users", "u-default", "memory", "learning-memory.json")
     )
   } finally {
     if (previousHome === undefined) delete process.env.YUNTI_HOME
