@@ -1036,6 +1036,11 @@ function installBrowserIsolationSchemas() {
         description:
           "Optional target id from yunti_list_browser_targets. Use it when browserSessionId is unavailable or stale; Yunti resolves and recovers the page route automatically.",
       }
+      schema.properties.pageHandleId ||= {
+        type: "string",
+        description:
+          "Preferred durable route for multi-step work: the opaque pageHandleId returned by yunti_list_browser_targets for a live tab. It survives navigation, reload, content-script reinjection, extension reconnect, and Bridge restart while the same tab and browser instance exist. Never parse, edit, or persist it across a tab close. Do not combine it with a conflicting tabId, targetId, browserInstanceId, or browserSessionId.",
+      }
     }
     tool.inputSchema = schema
   }
@@ -1124,10 +1129,29 @@ export function toolUsageHints(args = {}) {
         "Use for page counts, all tabs, finding a tab, or choosing a CDP target.",
         "In 0.2.5+, each browser/profile has its own controller. With no explicit route, target inventory aggregates all compatible connected browser instances.",
         "Each page includes browserInstanceId, browserFamily, and routeBrowserSessionId so overlapping Chrome/Edge tab ids remain unambiguous.",
+        "In 0.2.7+, each page row also includes an opaque pageHandleId. Prefer it for multi-step work: it survives navigation, reload, content-script reinjection, extension reconnect, and Bridge restart while the same tab and browser instance exist.",
         "A page row's browserSessionId/pageSessionId is null until registered; routeBrowserSessionId is the controller transport, not a page id.",
         "Pass a returned tabId or targetId directly to observe/click/fill when needed; the controller establishes the content-script page session automatically.",
         "If a stale browserSessionId was supplied accidentally, target inventory falls back to the live controller route.",
         "In 0.2.4+, Edge sleeping-tab injection can briefly activate the target and restore the previous tab automatically; do not require a manual refresh, tab switch, or browser restart as the default recovery.",
+      ],
+    },
+    pageHandleId: {
+      purpose: "Opaque durable route for one live tab inside one browser instance.",
+      required: [],
+      recommended: ["pageHandleId"],
+      notes: [
+        "Returned by yunti_list_browser_targets and yunti_list_pages for every routable http/https tab, and accepted by page tools as an optional route input.",
+        "Treat it as opaque: never parse, edit, reconstruct, or persist it. A handle that is not returned by the live inventory is invalid.",
+        "It survives navigation, reload, content-script reinjection, MV3 worker suspension, extension reconnect, and Bridge restart while the same tab and browser instance exist.",
+        "It is terminal when the tab closes, when the owning browser instance disconnects (YUNTI_PAGE_HANDLE_CLOSED), when the numeric tab id was reused for a different tab (YUNTI_PAGE_HANDLE_STALE), or when the value is malformed (YUNTI_PAGE_HANDLE_INVALID). Those failures have retryBudget=0.",
+        "A read operation may continue after internal route recovery inside one tool call; a write operation is dispatched only once per request. If a write's result is uncertain, the runtime returns resultUncertain=true instead of replaying it.",
+        "Combining pageHandleId with a conflicting tabId, targetId, browserInstanceId, or browserSessionId fails with YUNTI_PAGE_HANDLE_ROUTE_MISMATCH rather than silently picking one.",
+        "Browser-level and raw CDP tools (list targets, list pages, get target, cdp_send_command, new/close page, select page, and the diagnostic/memory tools) do not accept a handle.",
+      ],
+      commonMistakes: [
+        "Do not treat pageHandleId as an element uid; observation uids remain fresh and observation-scoped.",
+        "Do not keep using a handle after the user closes that tab; list targets again.",
       ],
     },
     yunti_list_pages: {
@@ -1476,10 +1500,11 @@ export function toolUsageHints(args = {}) {
       "browserSessionId is the current user's browser route; tabId and targetId are selectors, not permissions.",
       "yunti_list_browser_targets is the canonical live browser inventory.",
       "yunti_list_pages is a compatibility alias for the same live target inventory.",
+      "For multi-step page work, prefer the opaque pageHandleId returned by target inventory. It survives navigation, reload, reinjection, extension reconnect, and Bridge restart while the same tab and browser instance exist; treat a closed tab, a reused numeric tab id, or a malformed value as terminal with retryBudget=0.",
       "For page operations, prefer observe -> act by fresh uid -> observe/verify once yunti_observe_page is available.",
       "In 0.2.5+, one controller per browser/profile transports that instance's browser and page tools; page sessions do not open independent long polls.",
       "Treat retryable, retryBudget, recoveryAction, and resultUncertain as authoritative. One failure chain shares one retry budget across all recovery layers.",
-      "YUNTI_BRIDGE_RUNTIME_MISMATCH, YUNTI_EXTENSION_PROTOCOL_MISMATCH, and YUNTI_BROWSER_INSTANCE_AMBIGUOUS have retryBudget=0; stop and follow recoveryAction instead of retrying.",
+      "YUNTI_BRIDGE_RUNTIME_MISMATCH, YUNTI_EXTENSION_PROTOCOL_MISMATCH, YUNTI_BROWSER_INSTANCE_AMBIGUOUS, and the YUNTI_PAGE_HANDLE_* failures have retryBudget=0; stop and follow recoveryAction instead of retrying.",
       "If a page browserSessionId is stale, follow the structured recoveryAction and spend at most its shared retryBudget; never retry the expired id itself.",
       "After yunti_new_page, use the returned browserSessionId for follow-up calls on the new tab.",
       "The controller heartbeat keeps metadata for tabs that still exist and removes routes for closed tabs.",

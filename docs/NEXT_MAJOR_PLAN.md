@@ -249,8 +249,10 @@ workflow:
 yunti_observe_page -> yunti_click/fill/select/scroll by uid -> observe/verify
 ```
 
-`yunti_take_snapshot` remains available. Newer docs and skill instructions should
-prefer `yunti_observe_page` once implemented.
+`yunti_take_snapshot` remains available as the compatibility path. Both it and
+`yunti_observe_page` mint action-ready uids: observation uids carry viewport
+rects directly, and snapshot uids resolve their rects through the accessibility
+tree while the debugger is attached.
 
 Success metrics:
 
@@ -266,7 +268,7 @@ Success metrics:
 
 Tool choice:
 
-- Use `yunti_observe_page` for the normal agent loop once available.
+- Use `yunti_observe_page` for the normal agent loop.
 - Use `yunti_get_page_snapshot` for lightweight route/title/text/auth overview.
 - Use `yunti_take_snapshot` as the compatibility path for existing uid-based
   action workflows.
@@ -290,8 +292,8 @@ The release direction is Yunti-first and ecosystem-informed:
 
 ### P6.1 Agent-Friendly Page Observation
 
-Status: in progress; P6.1.4 real-browser closure is pending Playwright/Chromium
-availability.
+Status: complete. P6.1.4 real-browser closure passed with Playwright 1.58.0
+(`observe -> click uid -> verify`); see `EXECUTION_PLAN.md`.
 
 Create `yunti_observe_page`, a higher-level observation tool. Use Page Agent's
 PageController/browser-state approach as the first concrete reference, adapted
@@ -496,7 +498,9 @@ Acceptance:
 
 ### P6.3 Agent Workflow Contract
 
-Status: planned.
+Status: complete. P6.3.1 shipped `docs/AGENT_WORKFLOW_CONTRACT.md`; P6.3.2
+shipped the minimal use cases in the Tool Guide, `yunti_get_tool_usage_hints`,
+and the packaged skill.
 
 Make the recommended agent workflow explicit in docs, skill, and tool hints.
 
@@ -582,7 +586,9 @@ Acceptance:
 
 ### P6.5 Optional Local Runtime Console
 
-Status: planned.
+Status: complete. P6.5.1 through P6.5.3 shipped `/console`,
+`/console/state`, `/console/cancel-pending`, the `console` CLI command, and
+real-browser validation.
 
 Create a non-required local console for debugging and operator confidence.
 

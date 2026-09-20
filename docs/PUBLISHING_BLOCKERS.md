@@ -5,10 +5,28 @@ publishing `yunti-browser-runtime`.
 
 ## Current Status
 
-No active npm publish blockers as of 2026-07-03.
+No active npm publish blockers.
 
-`yunti-browser-runtime@0.1.3` is published on the official npm registry and
-verified with `npm run release:verify-published`. `latest` points to `0.1.3`.
+`yunti-browser-runtime@0.2.6` is published on the official npm registry and
+verified with `npm run release:verify-published`; `latest` points to `0.2.6`.
+`0.2.7` is prepared in the working tree as the page-UI hotfix and becomes the
+published `latest` only after `npm run release:publish` completes.
+
+## Release Gate Status (Windows)
+
+Since the P0 hardening slice, the gate scripts are cross-platform:
+
+- `npm run release:check` exits 0 on Windows. It resolves npm's own CLI entry
+  point and runs it through `node` instead of spawning a bare `npm` command,
+  because Windows only ships `.cmd`/`.ps1` shims that cannot be spawned without
+  a shell.
+- Path assertions normalize separators before comparing, so `npm pack` output
+  and `doctor`/`print-config` paths match on Windows.
+- `npm pack --json` returns an array on older npm and an object keyed by package
+  name on npm 10+, and the package-contents check now accepts both shapes.
+- `YUNTI_E2E=1 npm run test:e2e` is a real gate: it fails with an explicit
+  diagnosis when no browser or Playwright module can be resolved instead of
+  skipping and exiting 0.
 
 ## Resolved Blocker: npm 2FA Publish Token
 

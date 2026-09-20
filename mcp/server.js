@@ -67,6 +67,26 @@ function preflightBrowserToolScope(tool, args = {}) {
 
 function classifyToolFailure(error, tool = "") {
   const message = error instanceof Error ? error.message : String(error)
+  const structured = normalizeBridgeFailure(error)
+  // A failure that already carries its own contract outranks the message-shape
+  // heuristics below: the extension knows more about its own failure than a
+  // regex over the error text does.
+  if (structured) {
+    return {
+      message,
+      code: structured.code,
+      retryable: Boolean(structured.retryable),
+      retryBudget: Number(structured.retryBudget || 0),
+      recoveryAction: structured.recoveryAction || inferRecoveryAction(structured.code),
+      resultUncertain: Boolean(structured.resultUncertain),
+      recoverable: structured.recoverable,
+      action: structured.action,
+      target: structured.target,
+      recoveryHint: structured.recoveryHint,
+      nextStepHint: structured.nextStepHint,
+      detail: buildFailureDetail(structured, message),
+    }
+  }
   if (/YUNTI_EXTENSION_PROTOCOL_MISMATCH/.test(message)) {
     return {
       message,
@@ -131,6 +151,61 @@ function classifyToolFailure(error, tool = "") {
     resultUncertain: false,
     detail: "Inspect the error and current browser targets before making another call.",
   }
+}
+
+const STRUCTURED_FAILURE_KEYS = [
+  "code",
+  "retryable",
+  "retryBudget",
+  "recoveryAction",
+  "resultUncertain",
+  "recoverable",
+  "action",
+  "target",
+  "recoveryHint",
+  "nextStepHint",
+  "diagnostics",
+]
+
+function normalizeBridgeFailure(error) {
+  const raw = error?.structuredFailure
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
+  const out = {}
+  for (const key of STRUCTURED_FAILURE_KEYS) {
+    const value = raw[key]
+    if (value === undefined || value === null || value === "") continue
+    out[key] = value
+  }
+  if (typeof out.code !== "string" || !out.code) return null
+  return out
+}
+
+function inferRecoveryAction(code) {
+  switch (code) {
+    case "CONTROLLER_PAGE_ROUTE_REQUIRED":
+      return "list_targets_then_retry_with_tab_id_or_page_session"
+    case "CONTENT_SCRIPT_UNAVAILABLE":
+      return "list_targets_then_retry_same_page_once"
+    case "EXTENSION_TOOL_TIMEOUT":
+      return "verify_state_before_retry"
+    case "LAST_TAB_CLOSE_BLOCKED":
+      return "inspect_error"
+    default:
+      return "inspect_error"
+  }
+}
+
+function buildFailureDetail(structured, message) {
+  const hint = structured.recoveryHint
+  const nextAction = hint?.nextAction || structured.recoveryAction || ""
+  const tools = Array.isArray(hint?.recommendedTools)
+    ? ` Recommended tools: ${hint.recommendedTools.join(", ")}.`
+    : ""
+  const uncertain = structured.resultUncertain
+    ? " The browser-side result is uncertain; verify page state before repeating a write."
+    : ""
+  const next = structured.nextStepHint ? ` ${structured.nextStepHint}` : ""
+  return `${message}${next}${nextAction ? ` Next action: ${nextAction}.` : ""}${tools}${uncertain}`.trim()
 }
 
 function bridgeRequestHeaders(bridgeToken = "") {

@@ -56,6 +56,12 @@ export function createSessionManager(options = {}) {
   async function forgetTab(tabId, reason = "tab_removed") {
     const session = sessionsByTab.get(tabId)
     sessionsByTab.delete(tabId)
+    // Remember the tab as closed so a later Chrome tab-id reuse cannot silently
+    // inherit the previous handle: the next time this id appears it gets a new
+    // generation and therefore a different, never-reused pageHandleId. This is
+    // recorded even for a tab that was never registered, because the heartbeat
+    // already advertises handles for unregistered live tabs.
+    await rememberTabGeneration(tabId, tabGenerationFor(tabId), { closed: true }).catch(() => null)
     if (!session) return { ok: true, removed: false, tabId }
     await postBridge("/sessions/unregister", {
       browserSessionId: session.browserSessionId,
@@ -63,6 +69,120 @@ export function createSessionManager(options = {}) {
       reason,
     }).catch(() => null)
     return { ok: true, removed: true, tabId, browserSessionId: session.browserSessionId }
+  }
+
+  // --- Stable page handle identity -------------------------------------
+  // A handle identifies one live tab in one browser instance and must survive
+  // navigation, reload, content-script reinjection, MV3 worker suspension,
+  // extension reconnect, and Bridge restart. It only encodes those two opaque
+  // identities plus a reuse generation, never URL, title, or origin.
+
+  const TAB_GENERATIONS_KEY = "yuntiTabGenerations"
+  const MAX_TRACKED_TAB_IDS = 800
+  const tabGenerations = new Map()
+  let tabGenerationLoad = null
+  let tabGenerationPersist = Promise.resolve()
+
+  function tabGenerationFor(tabId) {
+    return tabGenerations.get(Number(tabId))?.generation || 1
+  }
+
+  function pageHandleFor(tabId, browserInstanceId) {
+    const suffix = handleSuffix(browserInstanceId)
+    const generation = tabGenerationFor(tabId)
+    return `yunti-tab-${suffix}-${Number(tabId)}-${generation}`
+  }
+
+  function handleSuffix(value) {
+    return String(value || "")
+      .replace(/^yunti-browser-/, "")
+      .replace(/^yunti-page-\d+-/, "")
+      .replace(/[^a-zA-Z0-9_-]/g, "") || "local"
+  }
+
+  async function loadTabGenerations() {
+    if (!tabGenerationLoad) {
+      tabGenerationLoad = (async () => {
+        const stored = await chrome.storage.local
+          .get([TAB_GENERATIONS_KEY])
+          .catch(() => ({}))
+        const raw = stored?.[TAB_GENERATIONS_KEY]
+        if (!raw || typeof raw !== "object") return tabGenerations
+        for (const [key, entry] of Object.entries(raw)) {
+          const numeric = Number(key)
+          if (!Number.isFinite(numeric)) continue
+          const generation = Number(entry?.generation)
+          tabGenerations.set(numeric, {
+            generation: Number.isFinite(generation) && generation > 0 ? generation : 1,
+            closed: Boolean(entry?.closed),
+          })
+        }
+        return tabGenerations
+      })()
+    }
+    return tabGenerationLoad
+  }
+
+  async function persistTabGenerations() {
+    const entries = [...tabGenerations.entries()]
+      .sort((a, b) => b[1].generation - a[1].generation)
+      .slice(0, MAX_TRACKED_TAB_IDS)
+    if (entries.length < tabGenerations.size) {
+      tabGenerations.clear()
+      for (const [tabId, entry] of entries) tabGenerations.set(tabId, entry)
+    }
+    tabGenerationPersist = tabGenerationPersist
+      .catch(() => null)
+      .then(() =>
+        chrome.storage.local
+          .set({ [TAB_GENERATIONS_KEY]: Object.fromEntries(entries) })
+          .catch(() => null)
+      )
+    return tabGenerationPersist
+  }
+
+  async function rememberTabGeneration(tabId, generation, { closed = false } = {}) {
+    const key = Number(tabId)
+    if (!Number.isFinite(key) || key <= 0) return generation
+    await loadTabGenerations()
+    tabGenerations.set(key, { generation, closed })
+    await persistTabGenerations()
+    return generation
+  }
+
+  // Assigns the generation for a tab that is being (re)registered. A tab id that
+  // was recorded as closed is a reuse and gets a fresh generation.
+  async function ensureTabGeneration(tabId) {
+    const key = Number(tabId)
+    if (!Number.isFinite(key) || key <= 0) return 1
+    await loadTabGenerations()
+    const existing = tabGenerations.get(key)
+    if (!existing) {
+      tabGenerations.set(key, { generation: 1, closed: false })
+      await persistTabGenerations()
+      return 1
+    }
+    if (existing.closed) {
+      const next = existing.generation + 1
+      tabGenerations.set(key, { generation: next, closed: false })
+      await persistTabGenerations()
+      return next
+    }
+    return existing.generation
+  }
+
+  // Read-only handle map for the controller heartbeat. It must not write storage
+  // on every heartbeat, so unknown tab ids assume generation 1 and are corrected
+  // when the tab is actually registered.
+  async function tabHandlesForTabs(tabIds, browserInstanceId) {
+    await loadTabGenerations()
+    const handles = {}
+    for (const tabId of Array.isArray(tabIds) ? tabIds : []) {
+      const key = Number(tabId)
+      if (!Number.isFinite(key) || key <= 0) continue
+      handles[String(key)] = pageHandleFor(key, browserInstanceId)
+    }
+    return handles
   }
 
   async function registerBrowserController(reason = "heartbeat") {
@@ -73,6 +193,7 @@ export function createSessionManager(options = {}) {
     const browserInstanceId = browserSessionId
     const liveTabIds = await currentLiveTabIds()
     if (stopped) return { ok: false, reason: "stopped" }
+    const tabHandles = await tabHandlesForTabs(liveTabIds, browserInstanceId).catch(() => ({}))
     const session = {
       browserSessionId,
       kind: "browser_controller",
@@ -84,6 +205,7 @@ export function createSessionManager(options = {}) {
       title: "Yunti Browser Runtime",
       browserInstanceId,
       liveTabIds,
+      tabHandles,
       client: normalizeClientInfo(getBackgroundClientInfo(browserInstanceId)),
       protocolVersion: EXTENSION_PROTOCOL_VERSION,
       capabilities: {
@@ -91,6 +213,7 @@ export function createSessionManager(options = {}) {
         onDemandPageRecovery: true,
         stablePageSessionIds: true,
         multiBrowserController: true,
+        stablePageHandle: true,
       },
       auth: {
         state: "browser_controller",
@@ -153,7 +276,13 @@ export function createSessionManager(options = {}) {
         try {
           const liveTabIds = await currentLiveTabIds()
           if (controller.signal.aborted) break
-          if (controllerSession) controllerSession.liveTabIds = liveTabIds
+          if (controllerSession) {
+            controllerSession.liveTabIds = liveTabIds
+            controllerSession.tabHandles = await tabHandlesForTabs(
+              liveTabIds,
+              controllerSession.browserInstanceId || session.browserInstanceId
+            ).catch(() => controllerSession.tabHandles || {})
+          }
           await postBridge("/sessions/register", controllerSession || session).catch(() => null)
           const settings = await getSettings()
           if (controller.signal.aborted) break
@@ -219,6 +348,18 @@ export function createSessionManager(options = {}) {
         }
       })
     void controllerToolQueue
+  }
+
+  // Stops the single controller transport. Used when the controller route is
+  // torn down (browser unloaded, settings changed, or an embedding host shutting
+  // the worker down) so a pending long poll cannot keep the worker alive.
+  function stopControllerPolling() {
+    if (controllerPoller) {
+      controllerPoller.abort()
+      controllerPoller = null
+    }
+    controllerPollerRoute = ""
+    return { ok: true }
   }
 
   async function activateTab(tabId) {
@@ -449,11 +590,15 @@ export function createSessionManager(options = {}) {
     if (!controllerPoller || controllerPollerRoute !== controllerRouteKey) {
       await registerBrowserController("page_registration")
     }
+    const tabGeneration = await ensureTabGeneration(tab.id).catch(() => 1)
+    const pageHandleId = pageHandleFor(tab.id, browserControllerId)
     const browserSessionId =
       sessionsByTab.get(tab.id)?.browserSessionId ||
-      stablePageSessionId(tab.id, browserControllerId)
+      stablePageSessionId(tab.id, browserControllerId, tabGeneration)
     const session = {
       browserSessionId,
+      pageHandleId,
+      tabGeneration,
       kind: "page",
       userId: settings.localUserId || "",
       displayName: settings.localUserName || "",
@@ -473,6 +618,7 @@ export function createSessionManager(options = {}) {
       registeredAt: new Date().toISOString(),
     }
     sessionsByTab.set(tab.id, session)
+    await rememberTabGeneration(tab.id, tabGeneration).catch(() => null)
     await postBridge("/sessions/register", session).catch(() => null)
     return { ok: true, session, settings }
   }
@@ -608,23 +754,29 @@ export function createSessionManager(options = {}) {
     sessionsByTab,
     activateTab,
     ensureAllTabsRegistered,
+    ensureTabGeneration,
     ensureTabRegistered,
     forgetTab,
     forwardConsoleEvent,
     getPlatformMatches,
     handleMessage,
+    pageHandleFor,
     postBridge,
     registerBrowserController,
     setToolRequestHandler,
     stop,
+    stopControllerPolling,
+    tabGenerationFor,
+    tabHandlesForTabs,
   }
 }
 
-function stablePageSessionId(tabId, browserControllerId) {
+function stablePageSessionId(tabId, browserControllerId, tabGeneration = 1) {
   const controllerSuffix = String(browserControllerId || "")
     .replace(/^yunti-browser-/, "")
     .replace(/[^a-zA-Z0-9_-]/g, "")
-  return `yunti-page-${tabId}-${controllerSuffix || "local"}`
+  const generationSuffix = Number(tabGeneration) > 1 ? `-g${Number(tabGeneration)}` : ""
+  return `yunti-page-${tabId}-${controllerSuffix || "local"}${generationSuffix}`
 }
 
 function formatConsoleStackTrace(stackTrace) {

@@ -427,3 +427,74 @@ test("refreshActiveTab falls back to injection when active tab is not registered
     mock.restore()
   }
 })
+ 
+// --- Stable page handle identity ---
+
+test("page handles are stable for a live tab and change when its id is reused", async () => {
+  const stored = {}
+  const tabs = [
+    { id: 500, url: "https://example.test/", title: "Example", windowId: 1, active: true },
+  ]
+  const mock = installChromeMock({ tabs, storage: stored })
+  try {
+    const manager = createSessionManager()
+    const controllerId = "yunti-browser-controller-abc"
+
+    const firstGeneration = await manager.ensureTabGeneration(500)
+    assert.equal(firstGeneration, 1)
+    assert.equal(manager.pageHandleFor(500, controllerId), "yunti-tab-controller-abc-500-1")
+
+    // A plain re-registration (navigation, reload, reinjection) must not change
+    // the handle.
+    const repeatGeneration = await manager.ensureTabGeneration(500)
+    assert.equal(repeatGeneration, 1)
+    assert.equal(manager.pageHandleFor(500, controllerId), "yunti-tab-controller-abc-500-1")
+
+    // Closing the tab records it, and a later reuse of numeric id 500 gets a new
+    // generation so the old handle can never be rebound.
+    await manager.forgetTab(500, "tab_removed")
+    const reusedGeneration = await manager.ensureTabGeneration(500)
+    assert.equal(reusedGeneration, 2)
+    assert.equal(manager.pageHandleFor(500, controllerId), "yunti-tab-controller-abc-500-2")
+    assert.notEqual(
+      manager.pageHandleFor(500, controllerId),
+      "yunti-tab-controller-abc-500-1"
+    )
+
+    // The generation table survives a worker suspension via chrome.storage.
+    const restored = createSessionManager()
+    assert.equal(await restored.ensureTabGeneration(500), 2)
+    assert.equal(restored.pageHandleFor(500, controllerId), "yunti-tab-controller-abc-500-2")
+  } finally {
+    mock.restore()
+  }
+})
+
+test("controller heartbeats advertise a handle for every live tab", async () => {
+  const mock = installChromeMock({
+    tabs: [
+      { id: 700, url: "https://example.test/a", title: "A", windowId: 1, active: true },
+      { id: 701, url: "https://example.test/b", title: "B", windowId: 1, active: false },
+    ],
+  })
+  const manager = createSessionManager()
+  try {
+    await manager.registerBrowserController("test")
+
+    const handles = await manager.tabHandlesForTabs([700, 701], "yunti-browser-xyz")
+    assert.equal(Object.keys(handles).length, 2)
+    assert.match(handles["700"], /^yunti-tab-xyz-700-\d+$/)
+    assert.match(handles["701"], /^yunti-tab-xyz-701-\d+$/)
+    assert.notEqual(handles["700"], handles["701"])
+
+    const registered = mock.requests.find(
+      (request) => request.url.endsWith("/sessions/register") && request.body?.kind === "browser_controller"
+    )
+    assert.ok(registered)
+    assert.equal(registered.body.capabilities.stablePageHandle, true)
+    assert.equal(typeof registered.body.tabHandles, "object")
+  } finally {
+    manager.stopControllerPolling()
+    mock.restore()
+  }
+})

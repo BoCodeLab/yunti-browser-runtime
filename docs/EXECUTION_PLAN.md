@@ -2,7 +2,27 @@
 
 本文档记录 Yunti Browser Runtime 从本地 MVP 走向可开源、可长期稳定使用版本的执行计划。
 
-## 0.2.6 当前执行锚点
+## 0.2.7 当前执行锚点
+
+`0.2.7` 是基于已发布 `0.2.6` 的页面 UI 热修复：移除注入页面的 `AI` 悬浮按钮和
+「刷新连接」面板，不包含未完成的 P8 stable page handle 工作。详细范围见
+[RELEASE_0_2_7.md](RELEASE_0_2_7.md)。
+
+在同一版本内追加了 P0-P2 门禁与契约加固，仍未新增 MCP 工具、未变更协议版本：
+
+1. release 门禁跨平台化（npm CLI 入口解析、路径分隔符归一化、
+   `npm pack --json` 两种返回形态）：已完成，`npm run release:check` 在 Windows
+   上 exit 0。
+2. Windows 必红用例修复与真实浏览器 E2E 去空转：已完成，
+   `YUNTI_E2E=1 npm run test:e2e` 在真实 Chromium 扩展加载下通过。
+3. 抛错路径保留结构化失败契约（`failure` 字段贯通 extension → bridge → MCP）：
+   已完成。
+4. HTTP 长轮询层服务端集成测试：已完成，见 `tests/http-server.test.js`。
+5. `yunti_take_snapshot` uid 与 rect 解耦（`DOM.getBoxModel` 视口 rect 富化）：
+   已完成。
+6. 状态文档回填（发布状态、zip 清单、权限清单、P6 状态、工具数量）：已完成。
+
+### 0.2.6 执行锚点（历史）
 
 `0.2.6` 发布观察作用域 uid、deep wait、开放 Shadow DOM 坐标操作、完整 38
 场景 benchmark 和 Edge 延迟门禁。详细范围与验收见

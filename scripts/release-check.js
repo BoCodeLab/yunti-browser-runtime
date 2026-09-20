@@ -5,18 +5,6 @@ import { fileURLToPath } from "node:url"
 import { spawnSync } from "node:child_process"
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..")
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm"
-
-function portablePath(value) {
-  return String(value || "").replace(/\\/g, "/")
-}
-
-function spawnNpm(args, options) {
-  if (process.env.npm_execpath) {
-    return spawnSync(process.execPath, [process.env.npm_execpath, ...args], options)
-  }
-  return spawnSync(npmCommand, args, { ...options, shell: process.platform === "win32" })
-}
 const residueTerms = ["/Users", "Codeg", "xyy", "ybm100"]
 const residueRoots = ["README.md", "docs", "skills", "package.json"]
 const requiredExtensionZipFiles = [
@@ -37,6 +25,12 @@ const requiredExtensionZipFiles = [
 
 function readJsonFile(path) {
   return JSON.parse(readFileSync(join(rootDir, path), "utf8"))
+}
+
+// Path assertions in this gate are written with POSIX separators so they read the
+// same everywhere; normalize before comparing so Windows build output matches.
+function posixPath(value) {
+  return String(value || "").replace(/\\/g, "/")
 }
 
 function listFiles(path) {
@@ -282,13 +276,15 @@ function checkPrintConfigSmoke() {
       payload?.agent !== agent ||
       server?.command !== "node" ||
       !Array.isArray(server?.args) ||
-      !portablePath(server.args[0]).endsWith("mcp/server.js") ||
+      !posixPath(server.args[0]).endsWith("mcp/server.js") ||
       env.YUNTI_BROWSER_BRIDGE_PORT !== "48887" ||
       payload?.bridge?.tokenEnv !== "YUNTI_BROWSER_BRIDGE_TOKEN" ||
-      !portablePath(payload?.skill?.sourcePath).endsWith("skills/yunti-browser-runtime") ||
+      !posixPath(payload?.skill?.sourcePath).endsWith("skills/yunti-browser-runtime") ||
       (agent === "codex" &&
         (!String(payload?.skill?.installCommand || "").includes("~/.codex/skills") ||
-          !String(payload?.skill?.installCommand || "").includes(payload.skill.sourcePath)))
+          !posixPath(payload?.skill?.installCommand).includes(
+            posixPath(payload.skill.sourcePath)
+          )))
     ) {
       console.error("print-config smoke check failed:")
       console.error(`- agent: ${agent}`)
@@ -314,7 +310,7 @@ function checkPrintConfigSmoke() {
     !human.stdout.includes("Skill source:") ||
     !human.stdout.includes("Skill install:") ||
     !human.stdout.includes("~/.codex/skills") ||
-    !portablePath(human.stdout).includes("skills/yunti-browser-runtime")
+    !posixPath(human.stdout).includes("skills/yunti-browser-runtime")
   ) {
     console.error("print-config smoke check failed:")
     console.error(`- human exit code: ${human.status}`)
@@ -352,9 +348,9 @@ function checkDoctorSmoke() {
     checks.node?.ok !== true ||
     checks.node?.required !== ">=22" ||
     checks.mcpServer?.ok !== true ||
-    !portablePath(checks.mcpServer?.path).endsWith("mcp/server.js") ||
+    !posixPath(checks.mcpServer?.path).endsWith("mcp/server.js") ||
     checks.skill?.ok !== true ||
-    !portablePath(checks.skill?.path).endsWith("skills/yunti-browser-runtime/SKILL.md") ||
+    !posixPath(checks.skill?.path).endsWith("skills/yunti-browser-runtime/SKILL.md") ||
     typeof checks.bridge?.reachable !== "boolean" ||
     checks.bridge?.tokenHeader !== "x-yunti-browser-token" ||
     !Array.isArray(payload?.nextSteps)
@@ -370,14 +366,53 @@ function checkDoctorSmoke() {
   return true
 }
 
-function run(command, args) {
-  console.error(`\n$ ${[command, ...args].join(" ")}`)
-  const options = {
+function resolveNpmCliCandidates() {
+  const candidates = []
+  const register = (value) => {
+    const path = String(value || "").trim()
+    if (path && !candidates.includes(path)) candidates.push(path)
+  }
+  register(process.env.npm_execpath)
+  // Node layouts: <prefix>/bin/node + <prefix>/lib/node_modules/npm (POSIX),
+  // and C:\Program Files\nodejs\{node.exe,node_modules\npm} (Windows).
+  register(join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"))
+  register(join(dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"))
+  register(join(process.env.APPDATA || "", "npm", "node_modules", "npm", "bin", "npm-cli.js"))
+  return candidates
+}
+
+// Resolve the npm CLI entry point and hand it to node directly.
+// Spawning the bare command name fails on Windows because npm only ships
+// .cmd/.ps1 shims there, which are not executable without a shell.
+function npmCommand() {
+  for (const candidate of resolveNpmCliCandidates()) {
+    if (statSync(candidate, { throwIfNoEntry: false })?.isFile()) {
+      return { command: process.execPath, args: [candidate] }
+    }
+  }
+  return { command: process.platform === "win32" ? "npm.cmd" : "npm", args: [] }
+}
+
+function runNode(script, args = []) {
+  console.error(`\n$ node ${[script, ...args].join(" ")}`)
+  const result = spawnSync(process.execPath, [script, ...args], {
+    cwd: rootDir,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "inherit"],
+    env: process.env,
+  })
+  if (result.status !== 0) return false
+  return result.stdout || ""
+}
+
+function runNpm(args) {
+  console.error(`\n$ npm ${args.join(" ")}`)
+  const npm = npmCommand()
+  const result = spawnSync(npm.command, [...npm.args, ...args], {
     cwd: rootDir,
     stdio: "inherit",
     env: process.env,
-  }
-  const result = command === "npm" ? spawnNpm(args, options) : spawnSync(command, args, options)
+  })
   if (result.error) console.error(result.error.message)
   return result.status === 0
 }
@@ -408,14 +443,20 @@ function checkPackageContents() {
     "scripts/release-check.js",
   ]
 
-  console.error("\n$ npm pack --json --dry-run")
-  const result = spawnNpm(["pack", "--json", "--dry-run"], {
+  const npm = npmCommand()
+  console.error(`\n$ npm pack --json --dry-run`)
+  const result = spawnSync(npm.command, [...npm.args, "pack", "--json", "--dry-run"], {
     cwd: rootDir,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
     env: process.env,
   })
-  if (result.status !== 0) return false
+  if (result.status !== 0) {
+    console.error(
+      `npm pack failed (status=${result.status}${result.error ? `, ${result.error.message}` : ""}); resolved npm entry: ${npm.command}${npm.args.length ? ` ${npm.args[0]}` : " (PATH shim)"}`
+    )
+    return false
+  }
 
   let payload
   try {
@@ -425,10 +466,15 @@ function checkPackageContents() {
     return false
   }
 
-  const pack = Array.isArray(payload) ? payload[0] : payload?.[readJsonFile("package.json").name]
-  const packedFiles = new Set(
-    Array.isArray(pack?.files) ? pack.files.map((file) => file.path) : []
-  )
+  // `npm pack --json` returns an array on older npm versions and an object
+  // keyed by package name on npm 10+, so accept both shapes.
+  const pack = Array.isArray(payload) ? payload[0] : Object.values(payload || {})[0]
+  if (!pack || !Array.isArray(pack.files)) {
+    console.error("npm pack returned no file inventory:")
+    console.error(JSON.stringify(payload, null, 2))
+    return false
+  }
+  const packedFiles = new Set(pack.files.map((file) => file.path))
   const missing = requiredFiles.filter((file) => !packedFiles.has(file))
   if (missing.length) {
     console.error("Required npm package contents check failed:")
@@ -478,18 +524,12 @@ function listZipEntries(zipPath) {
 }
 
 function checkExtensionZipContents() {
-  console.error("\n$ node scripts/package-extension.js")
-  const result = spawnSync("node", ["scripts/package-extension.js"], {
-    cwd: rootDir,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "inherit"],
-    env: process.env,
-  })
-  if (result.status !== 0) return false
+  const stdout = runNode("scripts/package-extension.js")
+  if (!stdout) return false
 
   let payload
   try {
-    payload = JSON.parse(result.stdout || "{}")
+    payload = JSON.parse(stdout || "{}")
   } catch (error) {
     console.error(`extension package JSON parse failed: ${error.message}`)
     return false
@@ -534,9 +574,9 @@ ok = checkEdgeRecoveryGuidance() && ok
 ok = checkCliSmoke() && ok
 ok = checkPrintConfigSmoke() && ok
 ok = checkDoctorSmoke() && ok
-ok = run("npm", ["run", "check:action-results"]) && ok
-ok = run("npm", ["run", "check"]) && ok
-ok = run("npm", ["test"]) && ok
+ok = runNpm(["run", "check:action-results"]) && ok
+ok = runNpm(["run", "check"]) && ok
+ok = runNpm(["test"]) && ok
 ok = checkPackageContents() && ok
 ok = checkExtensionZipContents() && ok
 

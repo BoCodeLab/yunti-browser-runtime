@@ -55,6 +55,7 @@ Current file: `extension/manifest.json`.
 | --- | --- | --- | --- | --- |
 | `manifest_version` | `3` | Required modern extension format. | Low. | Keep. |
 | `permissions.activeTab` | present | Visible-tab capture fallback and temporary page access semantics. | Low to medium; generally narrower than persistent host access. | Keep. |
+| `permissions.alarms` | present | Periodic browser-controller bridge recovery heartbeat so a suspended MV3 worker reconnects without user action. | Low; no user-visible surface. | Keep. |
 | `permissions.debugger` | present | CDP commands, target-level automation, console/runtime/network events, and low-level recovery. | High. Chrome shows a debugger warning and reviewers may ask why this is core. | Keep for now; store copy must explain this is the core browser automation transport. |
 | `permissions.scripting` | present | Programmatically inject packaged content scripts into already-open supported pages after extension load or recovery. | Medium with broad host access; reviewers may ask why dynamic injection is needed. | Keep for developer/npm path so install does not require manual page refresh; explain it as recovery/registration, not arbitrary remote code execution. |
 | `permissions.storage` | present | Local bridge URL, optional token, user id/name, and page match settings. | Low. | Keep. |

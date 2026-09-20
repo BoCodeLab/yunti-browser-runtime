@@ -155,9 +155,20 @@ Release evidence must include:
 
 ### P8.2.4a - Contract And Resolver
 
-- add `pageHandleId` to target inventory and shared page-tool routing;
-- centralize legacy route and handle resolution;
-- add browser-instance collision and tab-id reuse tests.
+Status: implemented.
+
+- `pageHandleId` is minted by the extension from the stable browser-controller
+  id, the live `tabId`, and a persisted tab-id reuse generation, and is surfaced
+  through target/page inventory and `consoleState`.
+- `mcp/bridge-hub.js` centralizes handle parsing and resolution
+  (`parsePageHandleId`, `resolveHandleRoute`) and cross-checks a handle against
+  any conflicting `tabId`, `targetId`, `browserInstanceId`, or
+  `browserSessionId` before dispatch.
+- Browser-level and raw CDP tools reject a handle explicitly instead of ignoring
+  it.
+- Covered by browser-instance collision, tab-id reuse, closed-tab, malformed
+  handle, conflicting-route, unsupported-tool, cross-user, session-replacement,
+  and inventory-exposure tests, plus the real-browser gate.
 
 ### P8.2.4b - Navigation And Context Replacement
 

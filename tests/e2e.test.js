@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import http from "node:http"
+import { existsSync, readdirSync } from "node:fs"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -20,6 +21,23 @@ const extensionDir = join(rootDir, "extension")
 test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_E2E=1 to run real-browser smoke test" }, async (t) => {
   const playwright = await loadPlaywright()
 
+  const primaryExecutable = resolveChromiumExecutable()
+  // The second browser is only auto-detected from the Playwright-managed cache,
+  // never from a system install, and the cross-family assertions below only run
+  // when the caller explicitly requested the second browser.
+  const dualBrowserRun = Boolean(secondE2eExecutablePath)
+  const secondaryExecutable = dualBrowserRun
+    ? secondE2eExecutablePath
+    : resolveChromiumExecutable("YUNTI_E2E_SECOND_EXECUTABLE_PATH", {
+        allowSystemFallback: false,
+      })
+  t.diagnostic(
+    `chromium executable: ${primaryExecutable || "(playwright default)"}`
+  )
+  if (dualBrowserRun) {
+    t.diagnostic(`second chromium executable: ${secondaryExecutable}`)
+  }
+
   const artifactDir = await mkdtemp(join(tmpdir(), "yunti-browser-e2e-"))
   const bridge = await startBridgeServer({
     host: "127.0.0.1",
@@ -30,23 +48,22 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
   const bridgeUrl = `http://127.0.0.1:${bridgePort}`
   const pageServer = await startTestPageServer()
   const userDataDir = await mkdtemp(join(tmpdir(), "yunti-browser-profile-"))
-  const secondUserDataDir = secondE2eExecutablePath
-    ? await mkdtemp(join(tmpdir(), "yunti-browser-profile-second-"))
-    : ""
+  // Both executables must live in distinct profile dirs; when they are the same
+  // binary the second context would fight the first one over the profile lock.
+  const secondUserDataDir =
+    secondaryExecutable && secondaryExecutable !== primaryExecutable
+      ? await mkdtemp(join(tmpdir(), "yunti-browser-profile-second-"))
+      : ""
   let context = null
   let page = null
   let secondContext = null
   let secondPage = null
 
   try {
-    context = await playwright.chromium.launchPersistentContext(userDataDir, {
-      headless,
-      ...(e2eExecutablePath ? { executablePath: e2eExecutablePath } : {}),
-      args: [
-        `--disable-extensions-except=${extensionDir}`,
-        `--load-extension=${extensionDir}`,
-      ],
-    })
+    context = await playwright.chromium.launchPersistentContext(
+      userDataDir,
+      launchOptions(primaryExecutable)
+    )
 
     const worker = await getExtensionWorker(context)
     await worker.evaluate(
@@ -82,15 +99,11 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
     assert.equal(consoleState.warnings.some((warning) => warning.code === "NO_PAGE_SESSIONS"), false)
     assert.equal(consoleState.warnings.some((warning) => warning.code === "EXTENSION_VERSION_MISMATCH"), false)
 
-    if (secondE2eExecutablePath) {
-      secondContext = await playwright.chromium.launchPersistentContext(secondUserDataDir, {
-        headless,
-        executablePath: secondE2eExecutablePath,
-        args: [
-          `--disable-extensions-except=${extensionDir}`,
-          `--load-extension=${extensionDir}`,
-        ],
-      })
+    if (secondUserDataDir) {
+      secondContext = await playwright.chromium.launchPersistentContext(
+        secondUserDataDir,
+        launchOptions(secondaryExecutable)
+      )
       const secondWorker = await getExtensionWorker(secondContext)
       await secondWorker.evaluate(
         ({ bridgeUrl: runtimeBridgeUrl }) =>
@@ -114,10 +127,12 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
       )
       assert.equal(multiBrowserTargets.multiBrowser, true)
       assert.equal(multiBrowserTargets.browserCount, 2)
-      assert.deepEqual(
-        new Set(multiBrowserTargets.browsers.map((browser) => browser.browserFamily)),
-        new Set(["chrome", "edge"])
-      )
+      if (dualBrowserRun) {
+        assert.deepEqual(
+          new Set(multiBrowserTargets.browsers.map((browser) => browser.browserFamily)),
+          new Set(["chrome", "edge"])
+        )
+      }
     }
 
     const targets = await callTool(bridge, "yunti_list_browser_targets", { browserSessionId })
@@ -128,6 +143,37 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
     assert.equal(pageTarget.pageSessionId, browserSessionId)
     assert.notEqual(pageTarget.routeBrowserSessionId, browserSessionId)
     assert.equal(pageTarget.registered, true)
+
+    // The live inventory must expose a real, resolvable stable page handle.
+    assert.match(String(pageTarget.pageHandleId || ""), /^yunti-tab-.+-\d+-\d+$/)
+    const handleObservation = await callTool(bridge, "yunti_observe_page", {
+      pageHandleId: pageTarget.pageHandleId,
+      redaction: "balanced",
+    })
+    assert.equal(handleObservation.browserSessionId, browserSessionId)
+    assert.match(handleObservation.textTree, /Click me/)
+
+    // A handle alone drives an action; the runtime resolves the route internally.
+    await callTool(bridge, "yunti_fill", {
+      pageHandleId: pageTarget.pageHandleId,
+      selector: "#name",
+      value: "Handled",
+    })
+    const filledThroughHandle = await callTool(bridge, "yunti_evaluate_script", {
+      pageHandleId: pageTarget.pageHandleId,
+      expression: "document.querySelector('#name').value",
+    })
+    assert.equal(filledThroughHandle.value, "Handled")
+
+    // A handle must never be combined with a conflicting legacy route.
+    const conflicted = await callToolExpectError(bridge, "yunti_observe_page", {
+      pageHandleId: pageTarget.pageHandleId,
+      tabId: Number(pageTarget.tabId) + 1,
+    })
+    assert.match(
+      `${conflicted.code} ${conflicted.message || ""}`,
+      /YUNTI_PAGE_HANDLE_ROUTE_MISMATCH/
+    )
 
     const recoveredObservation = await callTool(bridge, "yunti_observe_page", {
       browserSessionId: `yunti-${pageTarget.tabId}-expired-legacy-session`,
@@ -224,11 +270,108 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
 })
 
 async function loadPlaywright() {
-  try {
-    return await import("playwright-core")
-  } catch {
-    throw new Error("Real-browser E2E requires the declared playwright-core dependency. Install dependencies before enabling YUNTI_E2E.")
+  // playwright-core is a declared dependency and ships the same chromium
+  // launcher API; the full `playwright` package is only needed to auto-install
+  // browser binaries. Prefer it when present, then fall back to playwright-core
+  // so the opt-in real-browser gate cannot silently turn into a no-op.
+  const errors = []
+  for (const candidate of ["playwright", "playwright-core"]) {
+    try {
+      return await import(candidate)
+    } catch (error) {
+      errors.push(`${candidate}: ${error?.message || String(error)}`)
+    }
   }
+  throw new Error(
+    `YUNTI_E2E=1 requires playwright or playwright-core. Run: npm install (playwright-core is a dependency).\n${errors.join("\n")}`
+  )
+}
+
+function launchOptions(executablePath = "") {
+  return {
+    headless: process.env.YUNTI_E2E_HEADLESS === "1",
+    ...(executablePath ? { executablePath } : {}),
+    args: [
+      `--disable-extensions-except=${extensionDir}`,
+      `--load-extension=${extensionDir}`,
+    ],
+  }
+}
+
+function resolveChromiumExecutable(
+  label = "YUNTI_E2E_EXECUTABLE_PATH",
+  { allowSystemFallback = true } = {}
+) {
+  for (const candidate of [
+    process.env[label],
+    process.env.YUNTI_E2E_EXECUTABLE_PATH,
+  ]) {
+    const path = String(candidate || "").trim()
+    if (path) return path
+  }
+  return findLocallyInstalledChromium({ allowSystemFallback })
+}
+
+function findLocallyInstalledChromium({ allowSystemFallback = true } = {}) {
+  const candidates = localPlaywrightChromiumCandidates()
+  if (!allowSystemFallback) {
+    return candidates.find((candidate) => candidate && existsSync(candidate)) || ""
+  }
+  const localAppData = process.env.LOCALAPPDATA || ""
+  const playwrightCache = process.env.PLAYWRIGHT_BROWSERS_PATH ||
+    (localAppData ? join(localAppData, "ms-playwright") : "")
+  if (playwrightCache && existsSync(playwrightCache)) {
+    const chromiumPrefix = process.platform === "win32" ? "chrome-win64" : "chrome-win"
+    for (const entry of readdirSyncSafe(playwrightCache)) {
+      if (!entry.startsWith("chromium-")) continue
+      candidates.push(join(playwrightCache, entry, chromiumPrefix, executableName()))
+    }
+  }
+  if (process.platform === "win32") {
+    candidates.push(
+      join(process.env.PROGRAMFILES || "", "Google", "Chrome", "Application", "chrome.exe"),
+      join(process.env["PROGRAMFILES(X86)"] || "", "Google", "Chrome", "Application", "chrome.exe"),
+      join(localAppData, "Google", "Chrome", "Application", "chrome.exe"),
+      join(process.env.PROGRAMFILES || "", "Microsoft", "Edge", "Application", "msedge.exe"),
+      join(process.env["PROGRAMFILES(X86)"] || "", "Microsoft", "Edge", "Application", "msedge.exe")
+    )
+  } else if (process.platform === "darwin") {
+    candidates.push(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium"
+    )
+  } else {
+    candidates.push(
+      "/usr/bin/google-chrome",
+      "/usr/bin/chromium",
+      "/usr/bin/chromium-browser"
+    )
+  }
+  return candidates.find((candidate) => candidate && existsSync(candidate)) || ""
+}
+
+function localPlaywrightChromiumCandidates() {
+  const localAppData = process.env.LOCALAPPDATA || ""
+  const cache = process.env.PLAYWRIGHT_BROWSERS_PATH ||
+    (localAppData ? join(localAppData, "ms-playwright") : "")
+  if (!cache || !existsSync(cache)) return []
+  const chromiumPrefix = process.platform === "win32" ? "chrome-win64" : "chrome-win"
+  return readdirSyncSafe(cache)
+    .filter((entry) => entry.startsWith("chromium-"))
+    .sort()
+    .map((entry) => join(cache, entry, chromiumPrefix, executableName()))
+}
+
+function readdirSyncSafe(path) {
+  try {
+    return readdirSync(path)
+  } catch {
+    return []
+  }
+}
+
+function executableName() {
+  return process.platform === "win32" ? "chrome.exe" : "chrome"
 }
 
 async function getExtensionWorker(context) {
@@ -320,4 +463,18 @@ async function callTool(bridge, name, args) {
   const text = response?.result?.content?.[0]?.text || ""
   assert.equal(response?.result?.isError, undefined, text)
   return response.result.structuredContent ?? JSON.parse(text)
+}
+
+async function callToolExpectError(bridge, name, args) {
+  const response = await handleJsonRpc(
+    {
+      jsonrpc: "2.0",
+      id: Math.floor(Math.random() * 1_000_000),
+      method: "tools/call",
+      params: { name, arguments: args },
+    },
+    bridge
+  )
+  assert.equal(response?.result?.isError, true, "expected the tool call to fail")
+  return response.result.structuredContent
 }

@@ -29,6 +29,7 @@ export function createToolDispatcher({
     let result
     let ok = true
     let error = null
+    let failure = null
     try {
       if (Number.isFinite(Number(event?.deadlineAt)) && Number(event.deadlineAt) <= Date.now()) {
         throw new Error(`Browser tool request timed out before execution: ${event.tool || "unknown"}`)
@@ -138,15 +139,109 @@ export function createToolDispatcher({
     } catch (err) {
       ok = false
       error = err instanceof Error ? err.message : String(err)
+      failure = classifyExtensionFailure(error, err, event.tool, tabId)
     }
-  
+
     await postBridge("/extension/result", {
       browserSessionId: transportSession.browserSessionId,
       requestId: event.id,
       ok,
       result,
       error,
+      failure,
     }).catch(() => {})
+  }
+
+  // A thrown error used to collapse to a bare message, losing every machine
+  // readable recovery hint. Classify it here so the MCP layer can keep
+  // code/retryable/retryBudget/resultUncertain instead of reporting a generic
+  // YUNTI_TOOL_ERROR.
+  function classifyExtensionFailure(message, error, tool, resolvedTabId) {
+    const text = String(message || "")
+    const explicitCode = String(error?.code || "").trim()
+    const base = {
+      ok: false,
+      code: explicitCode || "EXTENSION_TOOL_FAILED",
+      action: tool || undefined,
+      message: text,
+    }
+    if (/could not resolve an active http\/https browser tab/i.test(text)) {
+      return {
+        ...base,
+        code: explicitCode || "CONTROLLER_PAGE_ROUTE_REQUIRED",
+        recoverable: true,
+        recoveryHint: {
+          reason: "controller-route-has-no-page",
+          decision: "list-targets-then-retry-with-tabId-or-page-session",
+          nextAction: "yunti_list_browser_targets",
+          recommendedTools: [
+            "yunti_list_browser_targets",
+            "yunti_observe_page",
+            "yunti_select_page",
+          ],
+        },
+        nextStepHint:
+          "Pass the intended tabId or a registered page browserSessionId to this tool so the controller can resolve the concrete page.",
+      }
+    }
+    if (/timed out/i.test(text)) {
+      return {
+        ...base,
+        code: explicitCode || "EXTENSION_TOOL_TIMEOUT",
+        recoverable: false,
+        resultUncertain: true,
+        retryable: false,
+        retryBudget: 0,
+        recoveryAction: "verify_state_before_retry",
+        recoveryHint: {
+          reason: "extension-side-timeout",
+          decision: "verify-page-state-before-repeating-a-write",
+          nextAction: "observe-again",
+          recommendedTools: ["yunti_list_browser_targets", "yunti_observe_page"],
+        },
+        nextStepHint:
+          "The browser may or may not have applied this action. Inspect the current page state before deciding whether another call is safe.",
+      }
+    }
+    if (/Could not establish connection|Receiving end does not exist|No tab with id/i.test(text)) {
+      return {
+        ...base,
+        code: explicitCode || "CONTENT_SCRIPT_UNAVAILABLE",
+        recoverable: true,
+        recoveryHint: {
+          reason: "content-script-route-missing",
+          decision: "refresh-targets-then-retry-the-same-page-once",
+          nextAction: "yunti_list_browser_targets",
+          recommendedTools: ["yunti_list_browser_targets", "yunti_observe_page"],
+        },
+        nextStepHint:
+          "Yunti recovers content-script routes on demand. Retry the same page once; ask the user to refresh only if the browser explicitly blocks injection.",
+      }
+    }
+    if (/Cannot close the last connected tab/i.test(text)) {
+      return {
+        ...base,
+        code: explicitCode || "LAST_TAB_CLOSE_BLOCKED",
+        recoverable: false,
+        retryable: false,
+        retryBudget: 0,
+        recoveryAction: "inspect_error",
+        nextStepHint:
+          "Closing the last connected tab would drop the browser route. Close it through the browser UI or open another tab first.",
+      }
+    }
+    return {
+      ...base,
+      recoverable: false,
+      recoveryHint: {
+        reason: "extension-tool-failed",
+        decision: "inspect-error-and-current-page-state",
+        nextAction: "yunti_observe_page",
+        recommendedTools: ["yunti_get_page_snapshot", "yunti_observe_page"],
+      },
+      nextStepHint:
+        "Inspect the page state before repeating the same call; a thrown extension error is not a transport failure.",
+    }
   }
 
   function assertConcretePageRoute(tabId, session, event) {
@@ -464,6 +559,10 @@ export function createToolDispatcher({
         {}
       )
       elements = flattenAXTree(axTree?.nodes || [], maxElements, includeHidden)
+      // Accessibility nodes carry no geometry, so snapshot uids used to be
+      // unusable for uid actions (UID_COORDINATES_UNAVAILABLE). Resolve their
+      // viewport rects while the debugger is already attached.
+      await enrichSnapshotRects(tabId, elements)
     } catch {
       // Accessibility tree unavailable, fall back to DOM
       elements = await domFallbackSnapshot(tabId, maxElements)
@@ -478,6 +577,81 @@ export function createToolDispatcher({
       elements,
       elementCount: elements.length,
       snapshotId: `snap-${Date.now()}`,
+    }
+  }
+
+  const SNAPSHOT_RECT_CONCURRENCY = 12
+
+  async function enrichSnapshotRects(tabId, elements) {
+    const targets = elements.filter(
+      (el) => Number.isFinite(Number(el.backendNodeId)) && Number(el.backendNodeId) > 0
+    )
+    if (!targets.length) return elements
+
+    // DOM.getBoxModel returns coordinates relative to the document origin, while
+    // observed rects and elementFromPoint are viewport-relative, so translate
+    // using the current scroll offset.
+    const offsets = await snapshotScrollOffsets(tabId)
+    let cursor = 0
+    const workers = Array.from(
+      { length: Math.min(SNAPSHOT_RECT_CONCURRENCY, targets.length) },
+      async () => {
+        while (cursor < targets.length) {
+          const element = targets[cursor++]
+          const rect = await snapshotNodeRect(tabId, element.backendNodeId, offsets)
+          if (rect) element.rect = rect
+        }
+      }
+    )
+    await Promise.all(workers)
+    return elements
+  }
+
+  async function snapshotScrollOffsets(tabId) {
+    try {
+      const evaluated = await chromeDebuggerSendCommand({ tabId }, "Runtime.evaluate", {
+        expression:
+          "JSON.stringify({ x: window.scrollX || 0, y: window.scrollY || 0, vx: (window.visualViewport && window.visualViewport.offsetLeft) || 0, vy: (window.visualViewport && window.visualViewport.offsetTop) || 0 })",
+        returnByValue: true,
+      })
+      const parsed = JSON.parse(evaluated?.result?.value || "{}")
+      return {
+        x: Number(parsed.x) || 0,
+        y: Number(parsed.y) || 0,
+        viewportX: Number(parsed.vx) || 0,
+        viewportY: Number(parsed.vy) || 0,
+      }
+    } catch {
+      return { x: 0, y: 0, viewportX: 0, viewportY: 0 }
+    }
+  }
+
+  async function snapshotNodeRect(tabId, backendNodeId, offsets) {
+    try {
+      const model = await chromeDebuggerSendCommand({ tabId }, "DOM.getBoxModel", {
+        backendNodeId,
+      })
+      const quad = model?.model?.border || model?.model?.content
+      if (!Array.isArray(quad) || quad.length < 8) return null
+      const xs = [quad[0], quad[2], quad[4], quad[6]].map(Number)
+      const ys = [quad[1], quad[3], quad[5], quad[7]].map(Number)
+      if (!xs.every(Number.isFinite) || !ys.every(Number.isFinite)) return null
+      const left = Math.min(...xs) - offsets.x + offsets.viewportX
+      const top = Math.min(...ys) - offsets.y + offsets.viewportY
+      const width = Math.max(...xs) - Math.min(...xs)
+      const height = Math.max(...ys) - Math.min(...ys)
+      if (!(width > 0) || !(height > 0)) return null
+      return {
+        x: Math.round(left),
+        y: Math.round(top),
+        width: Math.round(width),
+        height: Math.round(height),
+      }
+    } catch {
+      // Nodes without a layout box (detached, display:none, or a non-DOM
+      // accessibility node) simply keep no rect; callers fall back to a fresh
+      // observation.
+      return null
     }
   }
 
@@ -1650,7 +1824,6 @@ export function createToolDispatcher({
       }
     }
     const el = uidMap[uid]
-    if (el.backendNodeId || el.nodeId) return { ok: true, element: el }
     if (el.rect && el.rect.width > 0 && el.rect.height > 0) {
       return {
         ok: true,
@@ -1658,6 +1831,9 @@ export function createToolDispatcher({
         y: el.rect.y + el.rect.height / 2,
       }
     }
+    // Accessibility nodes carry no geometry; keep the node reference so the uid
+    // can still be resolved through the debugger box model instead of failing.
+    if (el.backendNodeId || el.nodeId) return { ok: true, element: el }
     return {
       ok: false,
       error: `Cannot resolve coordinates for uid ${uid}. Run yunti_observe_page with includeRects enabled, scroll the element into view, or use an explicit selector fallback.`,

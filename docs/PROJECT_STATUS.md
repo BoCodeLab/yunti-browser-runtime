@@ -1,5 +1,70 @@
 # Project Status
 
+## P0-P2 Gate And Contract Hardening
+
+The active slice hardens the release gates and the failure contract. It is
+additive and does not change the MCP tool count, the extension protocol, or any
+existing success result field.
+
+Shipped:
+
+- **Cross-platform release gate.** `scripts/release-check.js` resolves npm's own
+  CLI entry point and runs it through `node` instead of spawning a bare `npm`
+  command, normalizes path separators before path assertions, and accepts both
+  `npm pack --json` output shapes. Before this, the package-contents gate read an
+  empty file inventory on npm 10+, and `npm run release:check` could not pass on
+  Windows at all.
+- **Windows-portable tests.** The learning-memory tests no longer build a
+  `file:///tmp/` URL, which threw `ERR_INVALID_FILE_URL_PATH` on Windows. The
+  suite is `201 passed / 0 failed / 1 skipped` with the opt-in browser gate
+  disabled.
+- **The real-browser gate is no longer a no-op.** `tests/e2e.test.js` imported
+  `playwright` while the declared dependency is `playwright-core`, so
+  `YUNTI_E2E=1 npm run test:e2e` reported `0 pass / 0 fail / 1 skip` and exited
+  0. It now resolves `playwright` then `playwright-core`, resolves a browser from
+  `YUNTI_E2E_EXECUTABLE_PATH` → Playwright cache → system Chrome/Edge, and fails
+  with an explicit diagnosis when none is available. Verified passing against a
+  real Chromium extension load.
+- **Structured failures survive the transport.** A thrown extension error used to
+  collapse to a bare message, losing every machine-readable recovery field.
+  `extension/tool-handlers.js` now classifies thrown errors
+  (`CONTROLLER_PAGE_ROUTE_REQUIRED`, `EXTENSION_TOOL_TIMEOUT`,
+  `CONTENT_SCRIPT_UNAVAILABLE`, `LAST_TAB_CLOSE_BLOCKED`,
+  `EXTENSION_TOOL_FAILED`), ships them as a `failure` field, and
+  `mcp/bridge-hub.js` + `mcp/server.js` preserve them through
+  `code/retryable/retryBudget/recoveryAction/resultUncertain/recoverable/
+  recoveryHint/nextStepHint` instead of reporting a generic `YUNTI_TOOL_ERROR`.
+- **Snapshot uids are action-ready.** Accessibility nodes carry no geometry, so
+  `yunti_take_snapshot` uids previously failed every uid action with
+  `UID_COORDINATES_UNAVAILABLE`. The snapshot now resolves viewport rects through
+  `DOM.getBoxModel` while the debugger is already attached, translating
+  document-space coordinates by the current scroll offset. Nodes without a layout
+  box keep no rect and still fail cleanly.
+- **Long-poll transport integration tests.** `tests/http-server.test.js` drives
+  the real HTTP surface: `/extension/poll`, `/extension/result` (including stale
+  request ids and transport mismatch), the three diagnostic event routes,
+  `/mcp/request`, `/mcp/local-tool`, `/console/cancel-pending`,
+  `/sessions/activate|unregister` ownership, and bridge-token protection.
+- **P8.2.4a stable page handle (contract and resolver).** `yunti_list_browser_targets`
+  and `yunti_list_pages` now return an opaque `pageHandleId` for every routable
+  tab, and page tools accept it as a route. The logical key is the owning browser
+  instance plus the live tab identity plus a tab-id reuse generation, so handles
+  are unique across Chrome/Edge/profiles and same-numbered tab ids, stable across
+  navigation, reload, reinjection, extension reconnect, and Bridge restart, and
+  never rebound when Chrome reuses a numeric tab id. Failures are terminal with
+  `retryBudget=0`: `YUNTI_PAGE_HANDLE_INVALID`, `YUNTI_PAGE_HANDLE_CLOSED`,
+  `YUNTI_PAGE_HANDLE_STALE`, `YUNTI_PAGE_HANDLE_ROUTE_MISMATCH`, and
+  `YUNTI_PAGE_HANDLE_UNSUPPORTED_TOOL`. User-facing routing now prefers handles in
+  `yunti_get_tool_usage_hints`, the packaged skill, and the Tool Guide.
+  Slices b-e (navigation/context replacement, restart recovery, typed lifecycle
+  and cancellation, endurance gate) remain open.
+- **Status-document sync.** `PUBLISHING_BLOCKERS.md`, `RELEASE.md`,
+  `SECURITY.md`, `EXTENSION_DISTRIBUTION.md`, and `NEXT_MAJOR_PLAN.md` no longer
+  claim a stale `latest`, a missing `dom-observer.js`, or an `alarms` permission
+  gap, and the P6.1.4 / P6.3 / P6.5 statuses match the shipped code. A regression
+  test now locks protocol and version identity across the runtime, the extension,
+  `doctor`, the manifest, and the published tool surface.
+
 ## 0.2.7 Page UI Hotfix
 
 `0.2.7` is an urgent hotfix based directly on published `0.2.6`. It removes

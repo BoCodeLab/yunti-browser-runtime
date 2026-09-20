@@ -170,9 +170,15 @@ export function createCdpController({
       .filter((target) => target.type === "page")
       .map((target) => {
         const pageSession = sessionsByTab.get(Number(target.tabId)) || null
+        const controllerHandles = session.tabHandles || {}
+        const pageHandleId =
+          pageSession?.pageHandleId ||
+          controllerHandles[String(target.tabId)] ||
+          ""
         return {
           browserSessionId: pageSession?.browserSessionId || null,
           pageSessionId: pageSession?.browserSessionId || null,
+          pageHandleId,
           routeBrowserSessionId: session.browserSessionId,
           browserInstanceId: session.browserInstanceId || session.client?.browserInstanceId || "",
           browserFamily: session.client?.family || "unknown",

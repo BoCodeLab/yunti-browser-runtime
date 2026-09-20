@@ -27,14 +27,26 @@ In `0.2.5+`, Chrome, Edge, and separate profiles can coexist. Target rows includ
 `browserInstanceId`, `browserFamily`, and `routeBrowserSessionId`. Protocol
 mismatch and ambiguous-browser errors have `retryBudget=0` and must not be retried.
 
+In `0.2.7+`, target rows also include an opaque `pageHandleId`. Prefer it as the
+durable route for multi-step work: it identifies one live tab inside one browser
+instance and survives navigation, reload, content-script reinjection, MV3 worker
+suspension, extension reconnect, and Bridge restart. Never parse, edit,
+reconstruct, or persist a handle — only use values returned by the live
+inventory. A handle is terminal with `retryBudget=0` when the tab closes
+(`YUNTI_PAGE_HANDLE_CLOSED`), when the numeric tab id was reused for a different
+tab (`YUNTI_PAGE_HANDLE_STALE`), when the value is malformed
+(`YUNTI_PAGE_HANDLE_INVALID`), or when it conflicts with another supplied route
+field (`YUNTI_PAGE_HANDLE_ROUTE_MISMATCH`). Browser-level and raw CDP tools do
+not accept a handle.
+
 For the full P6.3.1 workflow contract and copyable prompt, see
 [Agent Workflow Contract](AGENT_WORKFLOW_CONTRACT.md).
 
 ## Default Page Operation Contract
 
 1. Call `yunti_get_tool_usage_hints` when tool usage is uncertain.
-2. Call `yunti_list_browser_targets` and choose the intended
-   `browserSessionId`.
+2. Call `yunti_list_browser_targets` and choose the intended `pageHandleId`, or
+   the `browserSessionId` / `tabId` when a handle is unavailable.
 3. Call `yunti_observe_page` before page actions.
 4. Prefer fresh uids for click, hover, fill, select, scroll, type, press,
    upload, and drag operations. In `0.2.6+`, each uid is scoped to the

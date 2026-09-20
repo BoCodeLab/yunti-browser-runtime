@@ -1683,9 +1683,9 @@ test("learning memory uses the default local user scope", async (t) => {
     fs.mkdtemp(join(tmpdir(), "yunti-agent-home-test-"))
   )
   t.after(() => rm(tempDir, { recursive: true, force: true }))
+  process.env.YUNTI_HOME = tempDir
+  delete process.env.YUNTI_BROWSER_DATA_DIR
   try {
-    process.env.YUNTI_HOME = tempDir
-    delete process.env.YUNTI_BROWSER_DATA_DIR
     const response = await handleJsonRpc(
       {
         jsonrpc: "2.0",
@@ -2343,4 +2343,473 @@ test("yunti_close_page dispatches to extension", async () => {
   assert.equal(event.tool, "yunti_close_page")
   hub.submitResult({ browserSessionId: "tab-1", requestId: event.id, ok: true, result: { closed: true } })
   assert.deepEqual(await call, { closed: true })
+})
+
+// --- Structured failure passthrough (P1) ---
+
+test("extension failures keep their structured contract through the MCP layer", async () => {
+  const hub = new BridgeHub()
+  hub.registerSession({ browserSessionId: "tab-1", userId: "u1", url: "https://app.example.test/" })
+
+  const call = hub.callTool("yunti_click", { browserSessionId: "tab-1", userId: "u1", uid: "yunti-1" }, 1000)
+  const event = await hub.poll("tab-1", 100)
+  hub.submitResult({
+    browserSessionId: "tab-1",
+    requestId: event.id,
+    ok: false,
+    error: "click: stale uid yunti-1 is not in the latest page uid map",
+    failure: {
+      ok: false,
+      code: "UID_NOT_FOUND",
+      action: "click",
+      recoverable: true,
+      recoveryHint: {
+        reason: "stale-uid",
+        decision: "refresh-observation-before-retry",
+        nextAction: "yunti_observe_page",
+        recommendedTools: ["yunti_observe_page"],
+      },
+      nextStepHint: "Call yunti_observe_page again and use a fresh uid.",
+    },
+  })
+
+  const response = await handleJsonRpc(
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "yunti_click", arguments: { browserSessionId: "tab-1", userId: "u1", uid: "yunti-1" } },
+    },
+    { mode: "owner", hub: { callTool: () => call } }
+  )
+  const failure = response.result.structuredContent
+  assert.equal(response.result.isError, true)
+  assert.equal(failure.code, "UID_NOT_FOUND")
+  assert.equal(failure.action, "click")
+  assert.equal(failure.recoverable, true)
+  assert.equal(failure.recoveryHint.nextAction, "yunti_observe_page")
+  assert.match(failure.nextStepHint, /fresh uid/)
+  assert.match(response.result.content[0].text, /Next action: yunti_observe_page/)
+  assert.equal(failure.resultUncertain, false)
+})
+
+test("an extension timeout through the bridge reports resultUncertain", async () => {
+  const hub = new BridgeHub()
+  hub.registerSession({ browserSessionId: "tab-1", userId: "u1", url: "https://app.example.test/" })
+
+  const call = hub.callTool("yunti_fill", { browserSessionId: "tab-1", userId: "u1", uid: "yunti-2", value: "x" }, 1000)
+  const event = await hub.poll("tab-1", 100)
+  hub.submitResult({
+    browserSessionId: "tab-1",
+    requestId: event.id,
+    ok: false,
+    error: "Browser tool execution timed out inside the extension: yunti_fill",
+    failure: {
+      ok: false,
+      code: "EXTENSION_TOOL_TIMEOUT",
+      action: "yunti_fill",
+      recoverable: false,
+      retryable: false,
+      retryBudget: 0,
+      recoveryAction: "verify_state_before_retry",
+      resultUncertain: true,
+      nextStepHint: "Inspect the current page state before deciding whether another call is safe.",
+    },
+  })
+
+  const response = await handleJsonRpc(
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "yunti_fill", arguments: { browserSessionId: "tab-1", userId: "u1", uid: "yunti-2", value: "x" } },
+    },
+    { mode: "owner", hub: { callTool: () => call } }
+  )
+  const failure = response.result.structuredContent
+  assert.equal(failure.code, "EXTENSION_TOOL_TIMEOUT")
+  assert.equal(failure.resultUncertain, true)
+  assert.equal(failure.retryBudget, 0)
+  assert.equal(failure.recoveryAction, "verify_state_before_retry")
+  assert.match(response.result.content[0].text, /result is uncertain/)
+})
+
+test("bridge rejects with the structured failure attached to the error", async () => {
+  const hub = new BridgeHub()
+  hub.registerSession({ browserSessionId: "tab-1", userId: "u1", url: "https://app.example.test/" })
+
+  const call = hub.callTool("yunti_observe_page", { browserSessionId: "tab-1", userId: "u1" }, 1000)
+  const event = await hub.poll("tab-1", 100)
+  hub.submitResult({
+    browserSessionId: "tab-1",
+    requestId: event.id,
+    ok: false,
+    error: "observe failed",
+    failure: { ok: false, code: "NO_ACTIVE_TAB", recoverable: true },
+  })
+
+  await assert.rejects(call, (error) => {
+    assert.equal(error.message, "observe failed")
+    assert.equal(error.code, "NO_ACTIVE_TAB")
+    assert.equal(error.structuredFailure.code, "NO_ACTIVE_TAB")
+    return true
+  })
+})
+ 
+// --- Stable page handles (P8.2.4a) ---
+
+function registerControllerWithHandles(hub, {
+  browserSessionId,
+  userId = "u1",
+  liveTabIds = [],
+  tabHandles = {},
+}) {
+  hub.registerSession({
+    browserSessionId,
+    kind: "browser_controller",
+    userId,
+    browserInstanceId: browserSessionId,
+    liveTabIds,
+    tabHandles,
+    client: {
+      family: "chrome",
+      extensionVersion: PACKAGE_VERSION,
+      protocolVersion: CURRENT_EXTENSION_PROTOCOL_VERSION,
+      browserInstanceId: browserSessionId,
+    },
+    protocolVersion: CURRENT_EXTENSION_PROTOCOL_VERSION,
+    capabilities: { singleControllerTransport: true, stablePageHandle: true },
+  })
+}
+
+function registerPageForHandle(hub, {
+  browserSessionId,
+  pageHandleId,
+  tabId,
+  controllerId,
+  userId = "u1",
+  url = "https://app.example.test/",
+}) {
+  hub.registerSession({
+    browserSessionId,
+    pageHandleId,
+    tabGeneration: 1,
+    kind: "page",
+    userId,
+    tabId,
+    url,
+    browserInstanceId: controllerId,
+    browserControllerSessionId: controllerId,
+    client: {
+      extensionVersion: PACKAGE_VERSION,
+      protocolVersion: CURRENT_EXTENSION_PROTOCOL_VERSION,
+    },
+  })
+}
+
+test("a page handle routes to its own browser instance when tab ids collide", async () => {
+  const hub = new BridgeHub()
+  registerControllerWithHandles(hub, {
+    browserSessionId: "yunti-browser-aaaa",
+    liveTabIds: [100],
+    tabHandles: { 100: "yunti-tab-aaaa-100-1" },
+  })
+  registerControllerWithHandles(hub, {
+    browserSessionId: "yunti-browser-bbbb",
+    liveTabIds: [100],
+    tabHandles: { 100: "yunti-tab-bbbb-100-1" },
+  })
+
+  const firstCall = hub.callTool(
+    "yunti_observe_page",
+    { userId: "u1", pageHandleId: "yunti-tab-aaaa-100-1" },
+    1000
+  )
+  const firstEvent = await hub.poll("yunti-browser-aaaa", 100)
+  assert.equal(firstEvent.route.tabId, 100)
+  assert.equal(firstEvent.route.pageHandleId, "yunti-tab-aaaa-100-1")
+  assert.equal(firstEvent.route.viaController, true)
+  hub.submitResult({
+    browserSessionId: "yunti-browser-aaaa",
+    requestId: firstEvent.id,
+    ok: true,
+    result: { textTree: "from aaaa" },
+  })
+  assert.equal((await firstCall).textTree, "from aaaa")
+
+  const secondCall = hub.callTool(
+    "yunti_observe_page",
+    { userId: "u1", pageHandleId: "yunti-tab-bbbb-100-1" },
+    1000
+  )
+  const secondEvent = await hub.poll("yunti-browser-bbbb", 100)
+  assert.equal(secondEvent.route.tabId, 100)
+  assert.equal(secondEvent.route.pageHandleId, "yunti-tab-bbbb-100-1")
+  hub.submitResult({
+    browserSessionId: "yunti-browser-bbbb",
+    requestId: secondEvent.id,
+    ok: true,
+    result: { textTree: "from bbbb" },
+  })
+  assert.equal((await secondCall).textTree, "from bbbb")
+})
+
+test("a page handle keeps routing after its page session is replaced", async () => {
+  const hub = new BridgeHub()
+  registerControllerWithHandles(hub, {
+    browserSessionId: "yunti-browser-aaaa",
+    liveTabIds: [100],
+    tabHandles: { 100: "yunti-tab-aaaa-100-1" },
+  })
+  registerPageForHandle(hub, {
+    browserSessionId: "yunti-page-100-aaaa",
+    pageHandleId: "yunti-tab-aaaa-100-1",
+    tabId: 100,
+    controllerId: "yunti-browser-aaaa",
+  })
+
+  // The execution context is replaced by navigation/reinjection: same handle,
+  // same tab, new internal session id.
+  registerPageForHandle(hub, {
+    browserSessionId: "yunti-page-100-aaaa",
+    pageHandleId: "yunti-tab-aaaa-100-1",
+    tabId: 100,
+    controllerId: "yunti-browser-aaaa",
+    url: "https://app.example.test/next",
+  })
+
+  const call = hub.callTool(
+    "yunti_click",
+    { userId: "u1", pageHandleId: "yunti-tab-aaaa-100-1", uid: "yunti-1" },
+    1000
+  )
+  const event = await hub.poll("yunti-browser-aaaa", 100)
+  assert.equal(event.route.tabId, 100)
+  assert.equal(event.route.pageHandleId, "yunti-tab-aaaa-100-1")
+  assert.equal(event.arguments.uid, "yunti-1")
+  // The handle is a route, not an action argument: it is forwarded for
+  // diagnostics and idempotent route confirmation, while the session-scoped
+  // fields stay internal.
+  assert.equal(event.arguments.pageHandleId, "yunti-tab-aaaa-100-1")
+  assert.equal(event.arguments.browserSessionId, undefined)
+  assert.equal(event.arguments.userId, undefined)
+  hub.submitResult({
+    browserSessionId: "yunti-browser-aaaa",
+    requestId: event.id,
+    ok: true,
+    result: { clicked: true },
+  })
+  assert.deepEqual(await call, { clicked: true })
+})
+
+test("a closed tab makes its handle terminal instead of rebinding a reused tab id", async () => {
+  const hub = new BridgeHub()
+  registerControllerWithHandles(hub, {
+    browserSessionId: "yunti-browser-aaaa",
+    liveTabIds: [100],
+    tabHandles: { 100: "yunti-tab-aaaa-100-1" },
+  })
+
+  // Chrome reused numeric tab id 100 for a different tab in the same browser
+  // instance; the controller heartbeat reports a new generation.
+  registerControllerWithHandles(hub, {
+    browserSessionId: "yunti-browser-aaaa",
+    liveTabIds: [100],
+    tabHandles: { 100: "yunti-tab-aaaa-100-2" },
+  })
+
+  await assert.rejects(
+    hub.callTool("yunti_observe_page", { userId: "u1", pageHandleId: "yunti-tab-aaaa-100-1" }, 1000),
+    (error) => {
+      assert.match(error.message, /YUNTI_PAGE_HANDLE_STALE/)
+      assert.match(error.message, /retryBudget=0/)
+      return true
+    }
+  )
+
+  // The current generation handle still works.
+  const call = hub.callTool(
+    "yunti_observe_page",
+    { userId: "u1", pageHandleId: "yunti-tab-aaaa-100-2" },
+    1000
+  )
+  const event = await hub.poll("yunti-browser-aaaa", 100)
+  assert.equal(event.route.pageHandleId, "yunti-tab-aaaa-100-2")
+  hub.submitResult({
+    browserSessionId: "yunti-browser-aaaa",
+    requestId: event.id,
+    ok: true,
+    result: { textTree: "reused tab" },
+  })
+  assert.equal((await call).textTree, "reused tab")
+})
+
+test("a handle whose tab disappeared or browser instance is gone fails terminally", async () => {
+  const hub = new BridgeHub()
+  registerControllerWithHandles(hub, {
+    browserSessionId: "yunti-browser-aaaa",
+    liveTabIds: [100],
+    tabHandles: { 100: "yunti-tab-aaaa-100-1" },
+  })
+
+  await assert.rejects(
+    hub.callTool("yunti_observe_page", { userId: "u1", pageHandleId: "yunti-tab-aaaa-999-1" }, 1000),
+    /YUNTI_PAGE_HANDLE_CLOSED/
+  )
+  await assert.rejects(
+    hub.callTool("yunti_observe_page", { userId: "u1", pageHandleId: "yunti-tab-zzzz-100-1" }, 1000),
+    /YUNTI_PAGE_HANDLE_CLOSED/
+  )
+})
+
+test("handle inputs are validated and never silently combined with a conflicting route", async () => {
+  const hub = new BridgeHub()
+  registerControllerWithHandles(hub, {
+    browserSessionId: "yunti-browser-aaaa",
+    liveTabIds: [100],
+    tabHandles: { 100: "yunti-tab-aaaa-100-1" },
+  })
+  registerPageForHandle(hub, {
+    browserSessionId: "yunti-page-100-aaaa",
+    pageHandleId: "yunti-tab-aaaa-100-1",
+    tabId: 100,
+    controllerId: "yunti-browser-aaaa",
+  })
+
+  await assert.rejects(
+    hub.callTool("yunti_observe_page", { userId: "u1", pageHandleId: "yunti-page-100-aaaa" }, 1000),
+    /YUNTI_PAGE_HANDLE_INVALID/
+  )
+  await assert.rejects(
+    hub.callTool(
+      "yunti_observe_page",
+      { userId: "u1", pageHandleId: "yunti-tab-aaaa-100-1", tabId: 101 },
+      1000
+    ),
+    /YUNTI_PAGE_HANDLE_ROUTE_MISMATCH/
+  )
+  await assert.rejects(
+    hub.callTool(
+      "yunti_observe_page",
+      { userId: "u1", pageHandleId: "yunti-tab-aaaa-100-1", browserInstanceId: "yunti-browser-bbbb" },
+      1000
+    ),
+    /YUNTI_PAGE_HANDLE_ROUTE_MISMATCH/
+  )
+  await assert.rejects(
+    hub.callTool(
+      "yunti_observe_page",
+      { userId: "u1", pageHandleId: "yunti-tab-aaaa-100-1", browserSessionId: "yunti-page-999-aaaa" },
+      1000
+    ),
+    /YUNTI_PAGE_HANDLE_ROUTE_MISMATCH/
+  )
+  await assert.rejects(
+    hub.callTool("yunti_cdp_send_command", { userId: "u1", pageHandleId: "yunti-tab-aaaa-100-1", method: "Page.reload" }, 1000),
+    /YUNTI_PAGE_HANDLE_UNSUPPORTED_TOOL/
+  )
+  await assert.rejects(
+    hub.callTool("yunti_observe_page", { userId: "u2", pageHandleId: "yunti-tab-aaaa-100-1" }, 1000),
+    /No Yunti browser route is connected for userId: u2|browser instance that owns/
+  )
+
+  // The matching combination still routes.
+  const call = hub.callTool(
+    "yunti_observe_page",
+    { userId: "u1", pageHandleId: "yunti-tab-aaaa-100-1", tabId: 100 },
+    1000
+  )
+  const event = await hub.poll("yunti-browser-aaaa", 100)
+  assert.equal(event.route.tabId, 100)
+  assert.equal(event.route.requestedBrowserSessionId, "yunti-page-100-aaaa")
+  hub.submitResult({
+    browserSessionId: "yunti-browser-aaaa",
+    requestId: event.id,
+    ok: true,
+    result: { textTree: "matched" },
+  })
+  assert.equal((await call).textTree, "matched")
+})
+
+test("target inventory and page listings expose pageHandleId", async () => {
+  const hub = new BridgeHub()
+  registerControllerWithHandles(hub, {
+    browserSessionId: "yunti-browser-aaaa",
+    liveTabIds: [100],
+    tabHandles: { 100: "yunti-tab-aaaa-100-1" },
+  })
+  registerPageForHandle(hub, {
+    browserSessionId: "yunti-page-100-aaaa",
+    pageHandleId: "yunti-tab-aaaa-100-1",
+    tabId: 100,
+    controllerId: "yunti-browser-aaaa",
+  })
+
+  const listed = hub.listPages({ userId: "u1" })
+  assert.equal(listed.pages.length, 1)
+  assert.equal(listed.pages[0].pageHandleId, "yunti-tab-aaaa-100-1")
+
+  const state = hub.consoleState({ userId: "u1", runtimeVersion: PACKAGE_VERSION, expectedExtensionVersion: PACKAGE_VERSION })
+  const pageSummary = state.sessions.find((session) => session.kind === "page")
+  assert.equal(pageSummary.pageHandleId, "yunti-tab-aaaa-100-1")
+})
+
+test("page handles are not exposed on controllers and stay absent for unregistered tabs", () => {
+  const hub = new BridgeHub()
+  registerControllerWithHandles(hub, {
+    browserSessionId: "yunti-browser-aaaa",
+    liveTabIds: [100, 101],
+    tabHandles: { 100: "yunti-tab-aaaa-100-1" },
+  })
+  const state = hub.consoleState({ userId: "u1" })
+  const controller = state.sessions.find((session) => session.kind === "browser_controller")
+  assert.equal(controller.pageHandleId, "")
+  assert.deepEqual(hub.listPages({ userId: "u1" }).pages, [])
+})
+ 
+// --- Protocol and version identity (P2) ---
+
+test("protocol version and version references agree across the shipped surfaces", async () => {
+  const { readFileSync } = await import("node:fs")
+  const { join } = await import("node:path")
+  const { fileURLToPath } = await import("node:url")
+
+  const root = fileURLToPath(new URL("..", import.meta.url))
+  const read = (relative) => readFileSync(join(root, relative), "utf8")
+
+  // One protocol number, defined in one runtime module, imported everywhere else.
+  assert.equal(CURRENT_EXTENSION_PROTOCOL_VERSION, 1)
+  const extensionSessionManager = read("extension/session-manager.js")
+  assert.equal(
+    (extensionSessionManager.match(/EXTENSION_PROTOCOL_VERSION = (\d+)/) || [])[1],
+    String(CURRENT_EXTENSION_PROTOCOL_VERSION)
+  )
+
+  // doctor must not hardcode its own copy of the protocol number.
+  const doctor = read("scripts/doctor.js")
+  assert.match(doctor, /expectedProtocolVersion = 1\b/)
+  assert.equal(
+    /CONST\b|CURRENT_EXTENSION_PROTOCOL_VERSION/.test(doctor),
+    false,
+    "doctor should not redeclare the protocol constant from the runtime"
+  )
+
+  // The extension manifest version is what the runtime expects the browser to run.
+  const manifestVersion = require("../extension/manifest.json").version
+  assert.equal(manifestVersion, PACKAGE_VERSION)
+
+  // Usage hints carry a dated version that must stay parseable and not drift
+  // backwards from the release.
+  const hintsVersion = (read("mcp/tools.js").match(/version: "(\d{4}-\d{2}-\d{2})"/) || [])[1]
+  assert.match(String(hintsVersion || ""), /^\d{4}-\d{2}-\d{2}$/)
+  assert.ok(!Number.isNaN(Date.parse(hintsVersion)), `unparseable hints version: ${hintsVersion}`)
+
+  // Every published tool has a schema and a unique name.
+  const names = TOOLS.map((tool) => tool.name)
+  assert.equal(new Set(names).size, names.length)
+  assert.equal(names.length, 52)
+  for (const tool of TOOLS) {
+    assert.equal(typeof tool.inputSchema, "object", `${tool.name} is missing an inputSchema`)
+    assert.equal(tool.inputSchema.type, "object", `${tool.name} schema must be an object`)
+  }
 })

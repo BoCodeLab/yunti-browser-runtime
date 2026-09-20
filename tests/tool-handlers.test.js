@@ -2811,3 +2811,238 @@ test("latest observation replaces stale uid map", async () => {
     harness.restore()
   }
 })
+ 
+// --- Structured extension failures (P1) ---
+
+test("controller route without a concrete page reports a structured failure", async () => {
+  const harness = createDispatcherHarness()
+  try {
+    await harness.dispatcher.executeToolRequest(null, {
+      browserSessionId: "yunti-browser-controller",
+      kind: "browser_controller",
+      tabId: null,
+      userId: "local",
+    }, {
+      id: "request-no-page",
+      tool: "yunti_click",
+      arguments: { uid: "yunti-1" },
+      route: { tabId: null, viaController: true },
+    })
+
+    const posted = harness.posted.at(-1)
+    assert.equal(posted.ok, false)
+    assert.equal(posted.failure.code, "CONTROLLER_PAGE_ROUTE_REQUIRED")
+    assert.equal(posted.failure.recoverable, true)
+    assert.equal(posted.failure.recoveryHint.nextAction, "yunti_list_browser_targets")
+    assert.match(posted.failure.recoveryHint.decision, /list-targets/)
+    assert.match(posted.failure.nextStepHint, /tabId/)
+    assert.match(posted.error, /could not resolve an active http\/https browser tab/)
+  } finally {
+    harness.restore()
+  }
+})
+
+test("a hung content-script call reports a structured uncertain timeout", async () => {
+  const harness = createDispatcherHarness({
+    tabsById: { 7001: { id: 7001, url: "https://example.test/", title: "Example" } },
+    contentToolResponses: {
+      yunti_scroll: () => {
+        throw new Error("Timed out probing content script for tabId 7001")
+      },
+    },
+  })
+  try {
+    const session = {
+      browserSessionId: "yunti-page-7001-local",
+      kind: "page",
+      tabId: 7001,
+      userId: "local",
+      url: "https://example.test/",
+    }
+    harness.sessionsByTab.set(7001, session)
+    await harness.dispatcher.executeToolRequest(7001, session, {
+      id: "request-timeout",
+      tool: "yunti_scroll",
+      arguments: { deltaY: 400 },
+      route: { tabId: 7001 },
+    })
+    const posted = harness.posted.at(-1)
+    assert.equal(posted.ok, false)
+    assert.equal(posted.failure.code, "EXTENSION_TOOL_TIMEOUT")
+    assert.equal(posted.failure.resultUncertain, true)
+    assert.equal(posted.failure.retryBudget, 0)
+    assert.equal(posted.failure.recoveryAction, "verify_state_before_retry")
+    assert.match(posted.failure.nextStepHint, /may or may not have applied/)
+  } finally {
+    harness.restore()
+  }
+})
+
+test("a missing content-script route reports a recoverable structured failure", async () => {
+  const harness = createDispatcherHarness({
+    tabsById: { 8001: { id: 8001, url: "https://example.test/", title: "Example" } },
+    contentToolResponses: {
+      yunti_scroll: () => {
+        throw new Error("Could not establish connection. Receiving end does not exist.")
+      },
+    },
+  })
+  try {
+    const session = {
+      browserSessionId: "yunti-page-8001-local",
+      kind: "page",
+      tabId: 8001,
+      userId: "local",
+      url: "https://example.test/",
+    }
+    harness.sessionsByTab.set(8001, session)
+    await harness.dispatcher.executeToolRequest(8001, session, {
+      id: "request-no-receiver",
+      tool: "yunti_scroll",
+      arguments: { deltaY: 400 },
+      route: { tabId: 8001 },
+    })
+
+    const posted = harness.posted.at(-1)
+    assert.equal(posted.ok, false)
+    assert.equal(posted.failure.code, "CONTENT_SCRIPT_UNAVAILABLE")
+    assert.equal(posted.failure.recoverable, true)
+    assert.equal(posted.failure.recoveryHint.nextAction, "yunti_list_browser_targets")
+    assert.match(posted.failure.nextStepHint, /recovers content-script routes on demand/i)
+  } finally {
+    harness.restore()
+  }
+})
+ 
+// --- Snapshot uid actionability (P2) ---
+
+test("take_snapshot resolves viewport rects so snapshot uids can drive actions", async () => {
+  const harness = createDispatcherHarness({
+    cdpResponses: [
+      {
+        nodes: [
+          {
+            role: { value: "button" },
+            name: { value: "Save" },
+            backendDOMNodeId: 41,
+            properties: [],
+          },
+          {
+            role: { value: "textbox" },
+            name: { value: "Name" },
+            backendDOMNodeId: 42,
+            properties: [],
+          },
+        ],
+      },
+      { result: { value: JSON.stringify({ x: 0, y: 120 }) } },
+      { model: { border: [10, 240, 110, 240, 110, 280, 10, 280] } },
+      { model: { border: [200, 240, 320, 240, 320, 272, 200, 272] } },
+    ],
+  })
+  try {
+    const session = {
+      browserSessionId: "yunti-page-9001-local",
+      kind: "page",
+      tabId: 9001,
+      userId: "local",
+      url: "https://example.test/",
+    }
+    harness.sessionsByTab.set(9001, session)
+
+    const snapshot = await harness.dispatcher.executeToolRequest(9001, session, {
+      id: "request-snapshot",
+      tool: "yunti_take_snapshot",
+      arguments: {},
+      route: { tabId: 9001 },
+    })
+    assert.equal(snapshot, undefined)
+
+    const posted = harness.posted.at(-1)
+    assert.equal(posted.ok, true)
+    const elements = posted.result.elements
+    assert.equal(elements.length, 2)
+    // Document-space y (240) minus scrollY (120) => viewport y 120.
+    assert.deepEqual(elements[0].rect, { x: 10, y: 120, width: 100, height: 40 })
+    assert.deepEqual(elements[1].rect, { x: 200, y: 120, width: 120, height: 32 })
+    assert.equal(
+      harness.cdpCommands.filter((command) => command.method === "DOM.getBoxModel").length,
+      2
+    )
+
+    // Now a click by a snapshot uid must dispatch instead of failing with
+    // UID_COORDINATES_UNAVAILABLE.
+    const clickSession = { ...session }
+    await harness.dispatcher.executeToolRequest(9001, clickSession, {
+      id: "request-snapshot-click",
+      tool: "yunti_click",
+      arguments: { uid: elements[0].uid },
+      route: { tabId: 9001 },
+    })
+    const clickPost = harness.posted.at(-1)
+    assert.equal(clickPost.ok, true)
+    assert.equal(clickPost.result.ok, true)
+    assert.equal(clickPost.result.uid, elements[0].uid)
+    assert.equal(clickPost.result.x, 60)
+    assert.equal(clickPost.result.y, 140)
+    assert.equal(
+      harness.sentMessages.at(-1).message.arguments.x,
+      60
+    )
+  } finally {
+    harness.restore()
+  }
+})
+
+test("snapshot nodes without a layout box keep no rect and fail cleanly on use", async () => {
+  const harness = createDispatcherHarness({
+    cdpResponses: [
+      {
+        nodes: [
+          {
+            role: { value: "button" },
+            name: { value: "Detached" },
+            backendDOMNodeId: 77,
+            properties: [],
+          },
+        ],
+      },
+      { result: { value: JSON.stringify({ x: 0, y: 0 }) } },
+      { error: { message: "Could not compute box model." } },
+    ],
+  })
+  try {
+    const session = {
+      browserSessionId: "yunti-page-9002-local",
+      kind: "page",
+      tabId: 9002,
+      userId: "local",
+      url: "https://example.test/",
+    }
+    harness.sessionsByTab.set(9002, session)
+
+    await harness.dispatcher.executeToolRequest(9002, session, {
+      id: "request-snapshot-boxless",
+      tool: "yunti_take_snapshot",
+      arguments: {},
+      route: { tabId: 9002 },
+    })
+    const posted = harness.posted.at(-1)
+    assert.equal(posted.ok, true)
+    assert.equal(posted.result.elements[0].rect, undefined)
+
+    await harness.dispatcher.executeToolRequest(9002, session, {
+      id: "request-boxless-click",
+      tool: "yunti_click",
+      arguments: { uid: posted.result.elements[0].uid },
+      route: { tabId: 9002 },
+    })
+    const clickPost = harness.posted.at(-1)
+    assert.equal(clickPost.ok, true)
+    assert.equal(clickPost.result.ok, false)
+    assert.equal(clickPost.result.code, "UID_COORDINATES_UNAVAILABLE")
+    assert.equal(clickPost.result.recoverable, true)
+  } finally {
+    harness.restore()
+  }
+})

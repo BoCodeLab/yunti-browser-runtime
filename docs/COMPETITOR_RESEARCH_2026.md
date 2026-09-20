@@ -1,4 +1,4 @@
-# 2026 Browser Agent Research And P8 Upgrade Plan
+﻿# 2026 Browser Agent Research And P8 Upgrade Plan
 
 ## Document Status
 
@@ -254,7 +254,7 @@ The main post-0.2.3 gaps are visible directly in the current codebase:
 | G7 Trajectory | only 100 in-memory activity events; failure artifacts are narrow | browser-use history and BrowserGym traces show the diagnostic value of durable action journals | add sanitized before/action/after journals and failure bundles |
 | G8 Evaluation | one real-browser smoke is not a benchmark | browser-use publishes real-world benchmark thinking; BrowserGym supplies scenario methodology | establish a Yunti reliability benchmark before broad feature work |
 | G9 Trust boundary | redaction and confirmation exist, but page text is not formally marked untrusted and origin policy is limited | BrowserGym security fixtures and Playwright MCP origin controls define concrete boundaries | mark page content untrusted and add origin policy/injection fixtures |
-| G10 Context surface | 51 fine-grained tools are exposed to every MCP client | active MCP projects provide slim modes or CLI/skill alternatives | add `core`, `devtools`, and `full` profiles without removing tools |
+| G10 Context surface | 52 fine-grained tools are exposed to every MCP client | active MCP projects provide slim modes or CLI/skill alternatives | add `core`, `devtools`, and `full` profiles without removing tools |
 | G11 Distribution | npm/unpacked updates can still require manual extension reload | Page Agent provides a store extension; active MCP tools ship skills/plugins | prepare store update path while keeping unpacked fallback |
 | G12 Remote lifecycle | local existing-browser mode only | browser-use and active browser infrastructure vendors validate optional persistence and remote scale demand | define an optional provider boundary after local reliability work |
 | G13 Route lifetime | controller recovery exists, but agents still retain transient `browserSessionId` values | browser-use separates browser/session lifecycle from page execution details; Page Agent refreshes ephemeral page state instead of promising permanent execution handles | add a stable tab-scoped `pageHandleId` and keep session replacement inside the runtime |

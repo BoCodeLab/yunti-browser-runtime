@@ -78,19 +78,40 @@ Ask the user before submitting, deleting, approving, purchasing, publishing, upl
   its browser and page tools. Chrome, Edge, and separate profiles may coexist;
   page actions route through the controller identified by `browserInstanceId`
   and `routeBrowserSessionId`.
+- In `0.2.7+`, prefer the opaque `pageHandleId` for multi-step page work. It
+  identifies one live tab inside one browser instance and survives navigation,
+  reload, content-script reinjection, MV3 worker suspension, extension
+  reconnect, and Bridge restart.
+- Treat `pageHandleId` as opaque: never parse, edit, reconstruct, or persist it.
+  Only use values returned by the live inventory. It is not an element uid;
+  observation uids stay fresh and observation-scoped.
+- A handle is terminal — with `retryBudget=0` — when the tab closes
+  (`YUNTI_PAGE_HANDLE_CLOSED`), when the numeric tab id was reused for a
+  different tab (`YUNTI_PAGE_HANDLE_STALE`), when the value is malformed
+  (`YUNTI_PAGE_HANDLE_INVALID`), or when it is combined with a conflicting
+  `tabId` / `targetId` / `browserInstanceId` / `browserSessionId`
+  (`YUNTI_PAGE_HANDLE_ROUTE_MISMATCH`). List targets again instead of retrying.
+- Browser-level and raw CDP tools (`yunti_list_browser_targets`,
+  `yunti_list_pages`, `yunti_get_browser_target`, `yunti_cdp_send_command`,
+  `yunti_new_page`, `yunti_close_page`, `yunti_select_page`, and the
+  diagnostic/memory tools) do not accept a handle.
 - A target inventory row has a page `browserSessionId` only when registered.
   `routeBrowserSessionId` is the controller transport and must not be mistaken
   for the page id.
-- Keep the returned `browserSessionId` for follow-up page and CDP calls.
-- Treat `retryable`, `retryBudget`, `recoveryAction`, and `resultUncertain` as
-  authoritative. One failure chain has one shared retry budget; do not let the
-  MCP client, this skill, and a fallback backend each spend a separate retry.
+- Keep the returned `browserSessionId` for follow-up page and CDP calls when you
+  are not using a handle.
+- Treat `retryable`, `retryBudget`, `recoveryAction`, `resultUncertain`,
+  `recoverable`, `recoveryHint`, and `nextStepHint` as authoritative. One failure
+  chain has one shared retry budget; do not let the MCP client, this skill, and a
+  fallback backend each spend a separate retry. Browser-side thrown failures keep
+  their structured diagnostics through the bridge, so read them instead of
+  guessing from the message.
 - For `YUNTI_SESSION_STALE`, discard the stale id, list targets once, and spend
   the single retry on the selected live page route.
 - For `YUNTI_BRIDGE_RUNTIME_MISMATCH`,
-  `YUNTI_EXTENSION_PROTOCOL_MISMATCH`, or
-  `YUNTI_BROWSER_INSTANCE_AMBIGUOUS`, retry zero times. Follow
-  `recoveryAction`; do not probe with other page tools.
+  `YUNTI_EXTENSION_PROTOCOL_MISMATCH`,
+  `YUNTI_BROWSER_INSTANCE_AMBIGUOUS`, or any `YUNTI_PAGE_HANDLE_*` failure,
+  retry zero times. Follow `recoveryAction`; do not probe with other page tools.
 - If `resultUncertain: true`, verify current page state before deciding whether
   another call is safe. Never replay a possibly completed write through DOM or
   CDP without verification.

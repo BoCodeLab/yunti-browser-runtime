@@ -74,11 +74,12 @@ Build and inspect the browser extension zip:
 
 ```bash
 npm run package:extension
-unzip -l dist/yunti-browser-runtime-extension-0.2.4.zip
+unzip -l dist/yunti-browser-runtime-extension-0.2.7.zip
 ```
 
 `npm run release:check` also validates this zip automatically by parsing the
-actual archive entries.
+actual archive entries. The packaged filename always carries the current
+`package.json` version.
 
 The zip should contain only the extension runtime files:
 
@@ -86,8 +87,9 @@ The zip should contain only the extension runtime files:
 - `cdp.js`
 - `content.css`
 - `content.js`
-- `network-monitor.js`
+- `dom-observer.js`
 - `manifest.json`
+- `network-monitor.js`
 - `popup.css`
 - `popup.html`
 - `popup.js`
@@ -97,11 +99,20 @@ The zip should contain only the extension runtime files:
 
 ## Optional Real-Browser Smoke Test
 
-Run this when Playwright and Chromium are available:
+Run this when a Chromium-family browser is available:
 
 ```bash
 YUNTI_E2E=1 npm run test:e2e
 ```
+
+The runner resolves a browser from `YUNTI_E2E_EXECUTABLE_PATH`, then the
+Playwright-managed Chromium cache, then a locally installed Chrome/Edge. It uses
+the declared `playwright-core` dependency, so no browser download is required
+when one of those is present. `YUNTI_E2E=1` is a real gate: if neither a browser
+nor `playwright`/`playwright-core` can be resolved, the test fails with an
+explicit diagnosis instead of skipping. Set `YUNTI_E2E_SECOND_EXECUTABLE_PATH` to
+add the second-browser (Chrome + Edge controller aggregation) assertions, and
+`YUNTI_E2E_HEADLESS=1` when a headed window is not desired.
 
 The default `npm test` run skips the real-browser smoke test unless `YUNTI_E2E=1`
 is set. The smoke test loads the unpacked extension in Chromium and verifies the

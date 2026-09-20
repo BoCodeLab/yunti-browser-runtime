@@ -38,6 +38,16 @@ export function toolError(message, options = {}) {
     recoveryAction: typeof options === "object" ? options.recoveryAction || "inspect_error" : "inspect_error",
     resultUncertain: typeof options === "object" ? Boolean(options.resultUncertain) : false,
   }
+  // Optional additive fields: browser-side failures carry their own
+  // recoverable/recoveryHint/nextStepHint contract, and dropping it here would
+  // force the agent back to guessing from prose.
+  if (typeof options === "object" && options !== null) {
+    for (const key of ["recoverable", "recoveryHint", "nextStepHint", "action", "target", "diagnostics"]) {
+      const value = options[key]
+      if (value === undefined || value === null || value === "") continue
+      failure[key] = value
+    }
+  }
   return {
     isError: true,
     content: [{ type: "text", text: payload }],

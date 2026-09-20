@@ -94,6 +94,45 @@ function controllerIdFromPageSessionId(value) {
   return match?.[1] ? `yunti-browser-${match[1]}` : ""
 }
 
+// --- Stable page handles (P8.2.4a) -------------------------------------
+// A handle identifies one live tab inside one browser instance and survives
+// navigation, reload, content-script reinjection, extension reconnect, and
+// Bridge restart. It never embeds page data. The numeric suffix is the tab-id
+// reuse generation, so a reused numeric tab id can never inherit an old handle.
+
+const PAGE_HANDLE_RE = /^yunti-tab-(.+)-(\d+)-(\d+)$/
+
+export function parsePageHandleId(value) {
+  const raw = String(value || "").trim()
+  const match = raw.match(PAGE_HANDLE_RE)
+  if (!match) return null
+  const tabId = normalizeTabId(match[2])
+  const generation = Number(match[3])
+  if (!tabId || !Number.isInteger(generation) || generation < 1) return null
+  return { raw, browserInstanceSuffix: match[1], tabId, generation }
+}
+
+function browserInstanceSuffix(meta = {}) {
+  const instanceId = normalizeBrowserInstanceId(meta)
+  if (instanceId) return instanceId.replace(/^yunti-browser-/, "")
+  return String(meta?.browserControllerSessionId || "").replace(/^yunti-browser-/, "")
+}
+
+function handleGenerationFor(controllerSession, tabId) {
+  const handles = controllerSession?.meta?.tabHandles
+  if (!handles || typeof handles !== "object") return null
+  const handle = handles[String(tabId)]
+  if (!handle) return null
+  const parsed = parsePageHandleId(handle)
+  return parsed ? parsed.generation : null
+}
+
+function controllerLiveTabIds(session) {
+  return Array.isArray(session?.meta?.liveTabIds)
+    ? new Set(session.meta.liveTabIds.map(normalizeTabId).filter(Boolean))
+    : null
+}
+
 const BROWSER_CONTROLLER_TOOLS = new Set([
   "yunti_list_browser_targets",
   "yunti_list_pages",
@@ -101,6 +140,77 @@ const BROWSER_CONTROLLER_TOOLS = new Set([
   "yunti_cdp_send_command",
   "yunti_new_page",
 ])
+
+// Browser-level and raw-CDP tools have no single page to bind, so a page handle
+// is not meaningful for them.
+const PAGE_HANDLE_UNSUPPORTED_TOOLS = new Set([
+  ...BROWSER_CONTROLLER_TOOLS,
+  "yunti_close_page",
+  "yunti_get_tool_usage_hints",
+  "yunti_remember_learning",
+  "yunti_get_learning_memory",
+  "yunti_forget_learning_memory",
+  "yunti_get_network_log",
+  "yunti_clear_network_log",
+  "yunti_clear_network_requests",
+  "yunti_list_network_requests",
+  "yunti_get_network_request",
+  "yunti_get_cdp_events",
+  "yunti_clear_cdp_events",
+  "yunti_list_console_messages",
+  "yunti_get_console_message",
+  "yunti_clear_console_messages",
+  "yunti_select_page",
+])
+
+function handleRouteAllowsTool(tool) {
+  if (!tool) return true
+  return !PAGE_HANDLE_UNSUPPORTED_TOOLS.has(tool)
+}
+
+const STRUCTURED_FAILURE_KEYS = [
+  "code",
+  "retryable",
+  "retryBudget",
+  "recoveryAction",
+  "resultUncertain",
+  "recoverable",
+  "action",
+  "target",
+  "recoveryHint",
+  "nextStepHint",
+  "diagnostics",
+]
+
+function normalizeStructuredFailure(failure) {
+  if (!failure || typeof failure !== "object" || Array.isArray(failure)) return null
+  const out = {}
+  for (const key of STRUCTURED_FAILURE_KEYS) {
+    const value = failure[key]
+    if (value === undefined || value === null || value === "") continue
+    out[key] = value
+  }
+  if (typeof out.code !== "string" || !out.code) return null
+  return out
+}
+
+function withStructuredFailure(error, structured) {
+  if (!structured) return error
+  error.structuredFailure = structured
+  if (!error.code) error.code = structured.code
+  return error
+}
+
+function summarizeFailure(structured) {
+  if (!structured) return null
+  const summary = { type: "failure", ok: false }
+  if (structured.code) summary.code = redactLikelySensitiveText(structured.code, 120)
+  if (structured.action) summary.action = redactLikelySensitiveText(structured.action, 120)
+  if (structured.nextStepHint) {
+    summary.nextStepHint = redactLikelySensitiveText(structured.nextStepHint, 240)
+  }
+  return summary
+}
 
 function summarizeObject(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -124,6 +234,7 @@ function summarizeSession(session, activeSessionId) {
   const client = meta.client && typeof meta.client === "object" ? meta.client : {}
   return {
     browserSessionId: session.browserSessionId,
+    pageHandleId: redactLikelySensitiveText(meta.pageHandleId || "", 200),
     active: session.browserSessionId === activeSessionId,
     userId: redactLikelySensitiveText(meta.userId || "", 120),
     userName: redactLikelySensitiveText(meta.userName || "", 120),
@@ -624,6 +735,7 @@ export class BridgeHub {
       const meta = session.meta || {}
       return {
         browserSessionId: session.browserSessionId,
+        pageHandleId: meta.pageHandleId || "",
         url: meta.url || "",
         title: meta.title || "",
         tabId: meta.tabId ?? null,
@@ -744,6 +856,50 @@ export class BridgeHub {
       compatibleControllers.at(-1)
   }
 
+  // Resolves a stable page handle to its owning live controller and tab. This is
+  // the bounded resolver from STABLE_PAGE_HANDLE_PLAN.md: it never activates a
+  // tab, never mints a handle, and fails terminally when the tab or its browser
+  // instance is gone.
+  resolveHandleRoute(userId, parsedHandle) {
+    const controllers = this.controllerSessionsForUser(userId, { compatibleOnly: true })
+    const matchingInstance = controllers.filter(
+      (session) =>
+        browserInstanceSuffix(session.meta) === parsedHandle.browserInstanceSuffix
+    )
+    if (matchingInstance.length === 0) {
+      return {
+        ok: false,
+        code: "PAGE_HANDLE_CLOSED",
+        message: `YUNTI_PAGE_HANDLE_CLOSED: the browser instance that owns ${parsedHandle.raw} is not connected. The handle is terminal for this request. retryable=false retryBudget=0`,
+      }
+    }
+    if (matchingInstance.length > 1) {
+      return {
+        ok: false,
+        code: "PAGE_HANDLE_AMBIGUOUS",
+        message: `YUNTI_PAGE_HANDLE_AMBIGUOUS: more than one connected browser instance matches ${parsedHandle.raw}. Retry after the stale browser instance disconnects. retryable=false retryBudget=0`,
+      }
+    }
+    const controller = matchingInstance[0]
+    const liveTabIds = controllerLiveTabIds(controller)
+    if (liveTabIds && !liveTabIds.has(parsedHandle.tabId)) {
+      return {
+        ok: false,
+        code: "PAGE_HANDLE_CLOSED",
+        message: `YUNTI_PAGE_HANDLE_CLOSED: tab ${parsedHandle.tabId} no longer exists in the owning browser instance, so ${parsedHandle.raw} is closed. retryable=false retryBudget=0`,
+      }
+    }
+    const expectedGeneration = handleGenerationFor(controller, parsedHandle.tabId)
+    if (expectedGeneration !== null && expectedGeneration !== parsedHandle.generation) {
+      return {
+        ok: false,
+        code: "PAGE_HANDLE_STALE",
+        message: `YUNTI_PAGE_HANDLE_STALE: ${parsedHandle.raw} refers to generation ${parsedHandle.generation}, but tab ${parsedHandle.tabId} is generation ${expectedGeneration}. The numeric tab id was reused; list targets again for the current handle. retryable=false retryBudget=0`,
+      }
+    }
+    return { ok: true, controller, liveTabIds }
+  }
+
   resolveToolRoute(args, tool = "") {
     this.cleanupExpiredSessions()
     const userId =
@@ -759,7 +915,77 @@ export class BridgeHub {
       tabIdFromTargetId(args?.targetId) ||
       tabIdFromTargetId(args?.params?.targetId)
     const requestedBrowserInstanceId = String(args?.browserInstanceId || "").trim()
+    const rawHandle = String(args?.pageHandleId || "").trim()
+    const parsedHandle = rawHandle ? parsePageHandleId(rawHandle) : null
+    if (rawHandle && !parsedHandle) {
+      throw new Error(
+        `YUNTI_PAGE_HANDLE_INVALID: ${rawHandle} is not a page handle. pageHandleId is opaque; pass a value returned by yunti_list_browser_targets without editing it. retryable=false retryBudget=0`
+      )
+    }
+    const handleRoute = parsedHandle ? this.resolveHandleRoute(userId, parsedHandle) : null
+    if (handleRoute && !handleRoute.ok) {
+      throw new Error(handleRoute.message)
+    }
+    if (handleRoute && requestedTabId && requestedTabId !== parsedHandle.tabId) {
+      throw new Error(
+        `YUNTI_PAGE_HANDLE_ROUTE_MISMATCH: pageHandleId ${rawHandle} resolves to tab ${parsedHandle.tabId}, but tabId ${requestedTabId} was also supplied. Pass only one route. retryable=false retryBudget=0`
+      )
+    }
+    if (
+      handleRoute &&
+      requestedBrowserInstanceId &&
+      browserInstanceSuffix(handleRoute.controller.meta) !==
+        requestedBrowserInstanceId.replace(/^yunti-browser-/, "")
+    ) {
+      throw new Error(
+        `YUNTI_PAGE_HANDLE_ROUTE_MISMATCH: pageHandleId ${rawHandle} belongs to browser instance ${browserInstanceSuffix(handleRoute.controller.meta)}, not ${requestedBrowserInstanceId}. retryable=false retryBudget=0`
+      )
+    }
     const explicitSession = explicit ? this.getLiveSession(explicit) : null
+    if (
+      handleRoute &&
+      explicitSession &&
+      !isBrowserControllerSession(explicitSession) &&
+      normalizeTabId(explicitSession.meta?.tabId) !== parsedHandle.tabId
+    ) {
+      throw new Error(
+        `YUNTI_PAGE_HANDLE_ROUTE_MISMATCH: pageHandleId ${rawHandle} resolves to tab ${parsedHandle.tabId}, but browserSessionId ${explicit} is registered for tab ${normalizeTabId(explicitSession.meta?.tabId) ?? "unknown"}. retryable=false retryBudget=0`
+      )
+    }
+    // A stale session id is recoverable on its own, but it must not silently
+    // denote a different tab than the handle the caller selected.
+    if (handleRoute && explicit && !explicitSession) {
+      const staleTabId = tabIdFromBrowserSessionId(explicit)
+      if (staleTabId && staleTabId !== parsedHandle.tabId) {
+        throw new Error(
+          `YUNTI_PAGE_HANDLE_ROUTE_MISMATCH: pageHandleId ${rawHandle} resolves to tab ${parsedHandle.tabId}, but the stale browserSessionId ${explicit} denotes tab ${staleTabId}. retryable=false retryBudget=0`
+        )
+      }
+    }
+    if (handleRoute && !handleRouteAllowsTool(tool)) {
+      throw new Error(
+        `YUNTI_PAGE_HANDLE_UNSUPPORTED_TOOL: ${tool || "this tool"} is a browser-level operation and does not accept pageHandleId. Use the documented browserSessionId or tabId/targetId contract for it. retryable=false retryBudget=0`
+      )
+    }
+    if (handleRoute) {
+      const pageSession = [...this.sessions.values()].find(
+        (session) =>
+          !isBrowserControllerSession(session) &&
+          normalizeRouteUserId(session.meta?.userId) === userId &&
+          normalizeTabId(session.meta?.tabId) === parsedHandle.tabId &&
+          normalizeBrowserInstanceId(session.meta) ===
+            normalizeBrowserInstanceId(handleRoute.controller.meta)
+      )
+      return {
+        userId,
+        logicalSessionId: pageSession?.browserSessionId || parsedHandle.raw,
+        transportSessionId: handleRoute.controller.browserSessionId,
+        targetTabId: parsedHandle.tabId,
+        requestedSessionId: pageSession?.browserSessionId || "",
+        pageHandleId: parsedHandle.raw,
+        viaController: true,
+      }
+    }
     if (explicitSession && normalizeRouteUserId(explicitSession.meta?.userId) !== userId) {
       throw new Error(`browser session is not owned by userId: ${userId}`)
     }
@@ -1005,6 +1231,7 @@ export class BridgeHub {
         requestedBrowserSessionId: route.requestedSessionId,
         tabId: route.targetTabId,
         targetId: String(args?.targetId || args?.params?.targetId || ""),
+        pageHandleId: route.pageHandleId || "",
         viaController: route.viaController,
         recoveredStaleRoute: Boolean(route.recoveredStaleRoute),
       },
@@ -1318,7 +1545,7 @@ export class BridgeHub {
     })
   }
 
-  submitResult({ browserSessionId, requestId, ok, result, error }) {
+  submitResult({ browserSessionId, requestId, ok, result, error, failure = null }) {
     const pending = this.pendingRequests.get(requestId)
     if (!pending) return { accepted: false }
     if (browserSessionId && pending.transportSessionId !== browserSessionId) {
@@ -1336,14 +1563,20 @@ export class BridgeHub {
       })
       pending.resolve(result ?? null)
     } else {
+      const message = error || "Browser tool failed"
+      const structured = normalizeStructuredFailure(failure)
       this.recordActivity({
         type: "tool-result",
         tool: pending.tool,
         browserSessionId: pending.browserSessionId,
         status: "error",
-        message: error || "Browser tool failed",
+        message,
+        summary: summarizeFailure(structured) || undefined,
       })
-      pending.reject(new Error(error || "Browser tool failed"))
+      // Propagate the extension's structured failure so the MCP layer can keep
+      // code / retryable / retryBudget / recoveryAction / resultUncertain instead
+      // of degrading every browser-side error to a generic YUNTI_TOOL_ERROR.
+      pending.reject(withStructuredFailure(new Error(message), structured))
     }
     return { accepted: true }
   }

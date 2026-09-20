@@ -38,9 +38,11 @@ The extension uses browser permissions required for automation:
 
 - `tabs` for tab inventory and activation;
 - `debugger` for CDP commands;
+- `scripting` for on-demand content-script recovery and stylesheet injection;
 - `storage` for local bridge URL, optional token, user, and page-match settings;
 - `webRequest` for sanitized network observations;
-- `activeTab` for visible-tab capture fallback paths.
+- `activeTab` for visible-tab capture fallback paths;
+- `alarms` for the periodic browser-controller bridge recovery heartbeat.
 
 The extension currently declares broad `http://*/*` and `https://*/*` host
 access so it can register and operate arbitrary local user-selected pages. It
