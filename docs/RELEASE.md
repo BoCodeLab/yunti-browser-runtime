@@ -65,7 +65,7 @@ npm run release:prepublish
 ```
 
 This runs `npm run check:metadata` first, then `npm run release:check`.
-For the current `dingguangyi0/yunti-browser-runtime` repository metadata, this
+For the current `BoCodeLab/yunti-browser-runtime` repository metadata, this
 gate is expected to pass before publishing.
 
 ## Extension Package

@@ -1378,9 +1378,8 @@ Latest detailed P6.2 status:
 - P4.1 release-readiness docs and permission review is complete.
 - P4.2 Agent integration examples are complete.
 - P4.3 npm publishing URL confirmation is complete with the GitHub repository
-  `https://github.com/dingguangyi0/yunti-browser-runtime`; package metadata
-  points to that repository/homepage/issues URL set and all three URLs return
-  HTTP 200.
+  `https://github.com/BoCodeLab/yunti-browser-runtime`; package metadata points
+  to that repository/homepage/issues URL set and all three URLs return HTTP 200.
 - `npm view yunti-browser-runtime@0.1.0` returns the published `0.1.0` package
   metadata from `https://registry.npmjs.org/`.
 - Latest release gate checks passed after documenting P4.3: public-doc residue

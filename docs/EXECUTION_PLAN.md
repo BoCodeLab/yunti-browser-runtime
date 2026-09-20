@@ -1153,7 +1153,9 @@ Extension：
 当前结论：
 
 - P4.3 已完成：`package.json` 的 repository/homepage/bugs metadata 指向
-  `https://github.com/dingguangyi0/yunti-browser-runtime`，且公开可达。
+  `https://github.com/BoCodeLab/yunti-browser-runtime`，且公开可达。该仓库最初
+  发布在 `dingguangyi0` 账号下，现已迁到 `BoCodeLab` 组织，metadata 与
+  `origin` 保持一致。
 - npm 包名 `yunti-browser-runtime` 当前未发布；作为 `0.1.0` 首次发布状态已被接受。
 - 发布前最后保留 `npm publish --dry-run` 和人工发布确认。
 

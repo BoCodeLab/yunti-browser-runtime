@@ -61,9 +61,21 @@ async function requestHead(url) {
   }
 }
 
+// npm ships only .cmd/.ps1 shims on Windows, so the bare command name is not
+// executable there. Reuse npm's own CLI entry point when it is exposed.
+function npmCommand() {
+  const cli = String(process.env.npm_execpath || "").trim()
+  if (cli) return { command: process.execPath, args: [cli] }
+  return {
+    command: process.platform === "win32" ? "npm.cmd" : "npm",
+    args: [],
+  }
+}
+
 function npmViewPackage(name) {
   try {
-    const version = execFileSync("npm", ["view", name, "version", "--json"], {
+    const npm = npmCommand()
+    const version = execFileSync(npm.command, [...npm.args, "view", name, "version", "--json"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim()

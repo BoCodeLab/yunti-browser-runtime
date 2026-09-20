@@ -62,18 +62,20 @@ The verification command returns 0 and confirms the published package metadata.
 
 ## Resolved Blocker: P4.3 Package URLs
 
-Status: resolved on 2026-07-02 with
-`https://github.com/dingguangyi0/yunti-browser-runtime`.
+Status: resolved; the public home is
+`https://github.com/BoCodeLab/yunti-browser-runtime`.
 
 The package metadata currently points to:
 
-- Repository: `https://github.com/dingguangyi0/yunti-browser-runtime`
-- Homepage: `https://github.com/dingguangyi0/yunti-browser-runtime#readme`
-- Issues: `https://github.com/dingguangyi0/yunti-browser-runtime/issues`
+- Repository: `https://github.com/BoCodeLab/yunti-browser-runtime`
+- Homepage: `https://github.com/BoCodeLab/yunti-browser-runtime#readme`
+- Issues: `https://github.com/BoCodeLab/yunti-browser-runtime/issues`
 
-The previous `yunti-ai/yunti-browser-runtime` metadata returned HTTP 404. The
-project moved to the `dingguangyi0/yunti-browser-runtime` GitHub repository,
-and the initial `main` push succeeded.
+The previous `yunti-ai/yunti-browser-runtime` metadata returned HTTP 404, and
+the repository was later published under the `dingguangyi0` account before
+moving to the `BoCodeLab` organization. `git remote -v` points at
+`https://github.com/BoCodeLab/yunti-browser-runtime.git`, and the repository,
+homepage, and issues URLs all return HTTP 200.
 
 ## Resolution Options
 

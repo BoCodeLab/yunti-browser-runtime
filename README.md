@@ -279,7 +279,7 @@ yunti-browser-runtime soak-test
 ## 开发与验证
 
 ```bash
-git clone https://github.com/dingguangyi0/yunti-browser-runtime.git
+git clone https://github.com/BoCodeLab/yunti-browser-runtime.git
 cd yunti-browser-runtime
 npm install
 npm test
@@ -364,7 +364,7 @@ DOM 页面适合 fresh uid 与语义动作；跨域 frame、Canvas、浏览器 t
 修改时，请同时补充工具契约、测试、Agent 指引，并确保 15 分钟 soak coverage 不会
 遗漏新增公开工具。
 
-- [报告问题](https://github.com/dingguangyi0/yunti-browser-runtime/issues)
+- [报告问题](https://github.com/BoCodeLab/yunti-browser-runtime/issues)
 - [项目初衷](docs/PROJECT_INTENT.md)
 - [执行计划](docs/EXECUTION_PLAN.md)
 
