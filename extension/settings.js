@@ -2,7 +2,35 @@ export const DEFAULT_BRIDGE_URL = "http://127.0.0.1:48887"
 export const BRIDGE_TOKEN_HEADER = "x-yunti-browser-token"
 export const DEFAULT_PLATFORM_MATCHES = ["*"]
 
+// Settings are read several times per tool call (bridge URL, token, platform
+// matches, route user). Each read is a storage round trip on the hot path, so
+// cache the normalized snapshot briefly. Invalidation is explicit through
+// chrome.storage.onChanged (see installSettingsCacheInvalidation) and every
+// mutation path also clears the cache, so a changed setting is never served
+// for longer than SETTINGS_CACHE_TTL_MS.
+const SETTINGS_CACHE_TTL_MS = 2_000
+let cachedSettings = null
+let cachedSettingsAt = 0
+
+export function invalidateSettingsCache() {
+  cachedSettings = null
+  cachedSettingsAt = 0
+}
+
+export function installSettingsCacheInvalidation(target = globalThis.chrome) {
+  if (!target?.storage?.onChanged?.addListener) return false
+  target.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "local") return
+    invalidateSettingsCache()
+  })
+  return true
+}
+
 export async function getSettings() {
+  const now = Date.now()
+  if (cachedSettings && now - cachedSettingsAt < SETTINGS_CACHE_TTL_MS) {
+    return cachedSettings
+  }
   const stored = await chrome.storage.local.get([
     "localUserName",
     "localUserId",
@@ -13,7 +41,7 @@ export async function getSettings() {
   const platformMatches = normalizePlatformMatches(stored.platformMatches)
   const localUserName = normalizeLocalUserName(stored.localUserName || "local")
   const localUserId = stored.localUserId || "local"
-  return {
+  cachedSettings = {
     localUserName,
     localUserId,
     bridgeUrl: normalizeBaseUrl(stored.bridgeUrl || DEFAULT_BRIDGE_URL),
@@ -21,6 +49,8 @@ export async function getSettings() {
     agentType: "browser_agent",
     platformMatches,
   }
+  cachedSettingsAt = Date.now()
+  return cachedSettings
 }
 
 export function normalizeBaseUrl(value) {

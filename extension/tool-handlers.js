@@ -11,6 +11,8 @@ export function createToolDispatcher({
   postBridge,
   ensureTabRegistered,
   cdp,
+  getPlatformMatches = null,
+  getCaptureDiagnostics = null,
 }) {
   const {
     chromeDebuggerSendCommand,
@@ -26,17 +28,43 @@ export function createToolDispatcher({
 
   async function executeToolRequest(tabId, session, event) {
     const transportSession = session
+    const startedAt = Date.now()
     let result
     let ok = true
     let error = null
+    // Interactions that can open alert/confirm/prompt/beforeunload modals.
+    const pageOperation = DIALOG_RISK_TOOLS.has(event?.tool)
+    let dialogOpened = null
+    // Resolve the page route first, then run the tool itself inside a helper so
+    // the result promise can be raced against the dialog signal.
+    if (Number.isFinite(Number(event?.deadlineAt)) && Number(event.deadlineAt) <= Date.now()) {
+      await postBridge("/extension/result", {
+        browserSessionId: transportSession.browserSessionId,
+        requestId: event.id,
+        ok: false,
+        result: null,
+        error: `Browser tool request timed out before execution: ${event.tool || "unknown"}`,
+      }).catch(() => {})
+      return
+    }
     try {
-      if (Number.isFinite(Number(event?.deadlineAt)) && Number(event.deadlineAt) <= Date.now()) {
-        throw new Error(`Browser tool request timed out before execution: ${event.tool || "unknown"}`)
-      }
       const route = await resolveToolPageRoute(tabId, session, event)
       tabId = route.tabId
       session = route.session
       assertConcretePageRoute(tabId, session, event)
+    } catch (err) {
+      ok = false
+      error = err instanceof Error ? err.message : String(err)
+      await postBridge("/extension/result", {
+        browserSessionId: transportSession.browserSessionId,
+        requestId: event.id,
+        ok,
+        result,
+        error,
+      }).catch(() => {})
+      return
+    }
+    const dispatch = async () => {
       if (event.tool === "yunti_capture_visible_tab") {
         try {
           const dataUrl = await chrome.tabs.captureVisibleTab(session.windowId, {
@@ -70,6 +98,39 @@ export function createToolDispatcher({
             url: session.url,
             title: session.title || "",
             capturedAt: new Date().toISOString(),
+          }
+        }
+        const capture = describeImageCapture(result.dataUrl, result.method)
+        Object.assign(result, capture)
+        if (capture.captureEmpty) {
+          // capturVisibleTab follows the window's active tab; when the routed
+          // tab is in the background it can come back empty. Fall back to CDP
+          // so the caller gets pixels for the tab it actually asked about.
+          try {
+            await ensureCdpAttached(tabId, "1.3")
+            const shot = await chromeDebuggerSendCommand({ tabId }, "Page.captureScreenshot", { format: "png" })
+            const fallback = describeImageCapture(`data:image/png;base64,${shot?.data || ""}`, "cdp.Page.captureScreenshot")
+            if (!fallback.captureEmpty) {
+              result.dataUrl = `data:image/png;base64,${shot?.data || ""}`
+              result.method = "cdp.Page.captureScreenshot"
+              result.fallbackFrom = "tabs.captureVisibleTab"
+              result.fallbackReason = "active_tab_capture_empty"
+              Object.assign(result, fallback)
+            } else {
+              result.recoveryHint = {
+                reason: "visible-tab-capture-empty",
+                nextAction: "activate-tab-then-retry-or-use-take-screenshot",
+                recommendedTools: ["yunti_take_screenshot", "yunti_cdp_send_command"],
+                message:
+                  "tabs.captureVisibleTab only captures the window's active tab; activate the routed tab (Target.activateTarget) or use yunti_take_screenshot for the routed tab.",
+              }
+            }
+          } catch (error) {
+            result.recoveryHint = {
+              reason: "visible-tab-capture-empty",
+              nextAction: "use-take-screenshot",
+              message: `Empty visible-tab capture and the CDP fallback failed: ${error?.message || String(error)}`,
+            }
           }
         }
       } else if (event.tool === "yunti_cdp_send_command") {
@@ -135,11 +196,58 @@ export function createToolDispatcher({
           arguments: event.arguments || {},
         })
       }
+    }
+    try {
+      const dialog = await dispatchWithDialogWatch(dispatch, {
+        enabled: pageOperation,
+        tabId,
+        slowAfterMs: DIALOG_SLOW_AFTER_MS,
+      })
+      // A modal can open and be auto-dismissed by the browser within a few
+      // milliseconds (background/headless tabs), before the watch subscribes.
+      // Report it anyway: the caller still needs to know a modal appeared.
+      dialogOpened = dialog || dialogOpenedDuringCall(pageOperation, tabId, startedAt)
     } catch (err) {
       ok = false
       error = err instanceof Error ? err.message : String(err)
     }
-  
+
+    if (ok && dialogOpened) {
+      // A click that opens a native modal never gets its completion message
+      // back, because the modal freezes the renderer's JS thread. The CDP
+      // Page.javascriptDialogOpening signal lets us answer the caller
+      // immediately with an actionable, recoverable result instead of a
+      // 12s-25s timeout.
+      result = {
+        ...(result && typeof result === "object" ? result : {}),
+        action: event.tool,
+        dialogOpened: true,
+        dialog: {
+          type: dialogOpened.type || "alert",
+          hasMessage: Boolean(dialogOpened.message),
+          openedAt: dialogOpened.openedAt || null,
+          autoDismissed: Boolean(dialogOpened.autoDismissed),
+        },
+        resultUncertain: true,
+        recoverable: true,
+        ok: true,
+        browserSessionId: transportSession.browserSessionId,
+        nextStepHint: dialogOpened.autoDismissed
+          ? "A native browser dialog opened during this action and was dismissed automatically. Verify the resulting page state before continuing."
+          : "A native browser dialog opened and blocks this tab. Call yunti_handle_dialog with action accept|dismiss, then observe the page before continuing.",
+        recoveryHint: {
+          reason: "native-dialog-open",
+          nextAction: dialogOpened.autoDismissed ? "observe-again" : "handle-then-observe",
+          recommendedTools: dialogOpened.autoDismissed
+            ? ["yunti_get_page_snapshot", "yunti_observe_page"]
+            : ["yunti_handle_dialog", "yunti_get_page_snapshot"],
+        },
+      }
+    }
+
+    if (ok && CAPTURE_METADATA_TOOLS.has(event.tool)) {
+      result = attachCaptureMetadata(result, event)
+    }
     await postBridge("/extension/result", {
       browserSessionId: transportSession.browserSessionId,
       requestId: event.id,
@@ -149,8 +257,139 @@ export function createToolDispatcher({
     }).catch(() => {})
   }
 
-  function assertConcretePageRoute(tabId, session, event) {
-    if (!isBrowserControllerSession(session)) return
+  // How long a dialog-risk interaction waits for the CDP dialog signal before
+  // falling back to the normal completion path.
+  const DIALOG_WATCH_TIMEOUT_MS = 3_000
+  // Fast tools must not pay the dialog watch; only start watching once the
+  // operation has been running this long without finishing.
+  const DIALOG_SLOW_AFTER_MS = 500
+  const CAPTURE_METADATA_TOOLS = new Set([
+    "yunti_list_console_messages",
+    "yunti_list_network_requests",
+    "yunti_get_network_log",
+  ])
+  const DIALOG_RISK_TOOLS = new Set([
+    "yunti_click",
+    "yunti_click_at",
+    "yunti_hover",
+    "yunti_type_text",
+    "yunti_press_key",
+    "yunti_drag",
+    "yunti_upload_file",
+    "yunti_navigate_page",
+    "yunti_evaluate_script",
+  ])
+
+  async function awaitDialogOpen(tabId, enabled) {
+    if (!enabled || typeof cdp?.waitForDialogOpen !== "function") return null
+    return cdp.waitForDialogOpen(tabId, DIALOG_WATCH_TIMEOUT_MS).catch(() => null)
+  }
+
+  // A modal opened by the page freezes the renderer, so the tool's completion
+  // message may never arrive. Race the dialog signal against the operation
+  // itself, starting the watch only after the operation proves slow, so fast
+  // tools take exactly their normal path while a blocked tool answers as soon
+  // as the CDP dialog signal lands. Returns the dialog payload, or null when
+  // the operation finished first.
+  // Was a native dialog observed on this tab while the current tool call ran?
+  // Covers the case where the browser dismissed it before the watch subscribed.
+  function dialogOpenedDuringCall(enabled, tabId, startedAt) {
+    if (!enabled || typeof cdp?.lastDialogActivity !== "function" || !(Number(tabId) > 0)) return null
+    const activity = cdp.lastDialogActivity(tabId)
+    if (!activity?.openedAtMs) return null
+    if (activity.openedAtMs < startedAt - 50) return null
+    return {
+      type: activity.type || "alert",
+      openedAt: new Date(activity.openedAtMs).toISOString(),
+      autoDismissed: Boolean(activity.closedAtMs),
+    }
+  }
+
+  async function dispatchWithDialogWatch(startDispatch, { enabled, tabId, slowAfterMs }) {    if (!enabled || typeof cdp?.waitForDialogOpen !== "function" || !(Number(tabId) > 0)) {
+      await startDispatch()
+      return null
+    }
+    let settled = false
+    const toolPromise = startDispatch().then(
+      (value) => {
+        settled = true
+        return { outcome: "result", value }
+      },
+      (err) => {
+        settled = true
+        throw err
+      }
+    )
+    const dialogPromise = Promise.resolve()
+      .then(() => cdp.waitForDialogOpen(tabId, DIALOG_WATCH_TIMEOUT_MS))
+      .then(
+        (dialog) => (dialog ? { outcome: "dialog", dialog } : new Promise(() => {})),
+        () => new Promise(() => {})
+      )
+    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+    while (!settled) {
+      const first = await Promise.race([
+        toolPromise,
+        Promise.race([dialogPromise, delay(slowAfterMs).then(() => null)]),
+      ])
+      if (first === null) {
+        // The operation is slow: wait on the dialog signal and the operation.
+        return Promise.race([toolPromise, dialogPromise]).then((outcome) =>
+          outcome?.outcome === "dialog" ? outcome.dialog : null
+        )
+      }
+      if (first.outcome === "dialog") return first.dialog
+      return null
+    }
+    await toolPromise
+    return null
+  }
+
+  // Console/network capture is filtered by the extension's platformMatches.
+  // Without this descriptor an empty result is indistinguishable from "the page
+  // produced no events", which sent agents looking for bugs in the wrong place.
+  function captureFilterDescriptor() {
+    const platformMatches = typeof getPlatformMatches === "function" ? getPlatformMatches() : null
+    const list = Array.isArray(platformMatches) ? platformMatches : null
+    const filterActive = Boolean(list && list.length && !list.includes("*"))
+    const diagnostics = typeof getCaptureDiagnostics === "function" ? getCaptureDiagnostics() : null
+    return {
+      platformMatches: list || null,
+      filterActive,
+      ...(filterActive
+        ? {
+            hint: "Console and network capture only records hosts listed in the extension's platformMatches. Add this host (or '*') in the Yunti popup to capture it.",
+          }
+        : {}),
+      ...(diagnostics ? { bridgeDelivery: diagnostics } : {}),
+    }
+  }
+
+  function attachCaptureMetadata(result, event) {
+    if (!result || typeof result !== "object" || Array.isArray(result)) return result
+    const filters = captureFilterDescriptor()
+    const empty = Number(result.returned ?? result.total ?? 0) === 0
+    const metadata = {
+      ...result,
+      captureFilters: filters,
+    }
+    if (empty && filters.filterActive) {
+      metadata.code = "NO_CAPTURED_EVENTS"
+      metadata.recoverable = true
+      metadata.recoveryHint = {
+        reason: "capture-filtered-by-platform-matches",
+        nextAction: "adjust-platform-matches-or-pick-listed-host",
+        recommendedTools: ["yunti_observe_page"],
+        message: `No events were captured because this host is not in platformMatches (${filters.platformMatches.join(", ")}).`,
+      }
+      metadata.nextStepHint =
+        "The capture filter is active and excludes this host; this is a filter result, not a page-side failure."
+    }
+    void event
+    return metadata
+  }
+
+  function assertConcretePageRoute(tabId, session, event) {    if (!isBrowserControllerSession(session)) return
     if (BROWSER_CONTROLLER_TOOLS.has(event.tool)) return
     if (Number.isFinite(Number(tabId)) && Number(tabId) > 0) return
     throw new Error(
@@ -360,6 +599,47 @@ export function createToolDispatcher({
     let shot
     try {
       shot = await chromeDebuggerSendCommand({ tabId }, "Page.captureScreenshot", params)
+    } catch (error) {
+      const reason = error?.message || String(error)
+      // Page.captureScreenshot can stall on a throttled/background renderer.
+      // Fall back to a window capture so the caller still gets pixels, and make
+      // the failure stage explicit when nothing worked.
+      try {
+        const dataUrl = await chrome.tabs.captureVisibleTab(session.windowId, { format })
+        const fallback = describeImageCapture(dataUrl, "tabs.captureVisibleTab")
+        if (!fallback.captureEmpty) {
+          return {
+            dataUrl,
+            mimeType: `image/${format}`,
+            browserSessionId: session.browserSessionId,
+            format,
+            fullPage: false,
+            capturedAt: new Date().toISOString(),
+            ...fallback,
+            fallbackFrom: "cdp.Page.captureScreenshot",
+            fallbackReason: "cdp_capture_failed",
+            captureWarning: reason,
+          }
+        }
+      } catch {
+        // fall through to the structured failure below
+      }
+      return {
+        code: "SCREENSHOT_FAILED",
+        browserSessionId: session.browserSessionId,
+        format,
+        fullPage,
+        recoverable: true,
+        failedStage: "cdp.Page.captureScreenshot",
+        recoveryHint: {
+          reason: "screenshot-capture-failed",
+          nextAction: "activate-tab-then-retry",
+          recommendedTools: ["yunti_capture_visible_tab", "yunti_cdp_send_command"],
+          message: reason,
+        },
+        nextStepHint:
+          "The tab's renderer did not answer the screenshot. Verify page state, then retry once; a background or throttled tab may need activation before capture.",
+      }
     } finally {
       if (fullPage) {
         await chromeDebuggerSendCommand(
@@ -379,6 +659,23 @@ export function createToolDispatcher({
       format,
       fullPage,
       capturedAt: new Date().toISOString(),
+      ...describeImageCapture(dataUrl, "cdp.Page.captureScreenshot"),
+    }
+  }
+
+  // Screenshot payloads are opaque base64 strings, so a caller cannot tell an
+  // empty capture from a real one. Derive explicit, non-sensitive diagnostics.
+  function describeImageCapture(dataUrl, method) {
+    const text = typeof dataUrl === "string" ? dataUrl : ""
+    const match = text.match(/^data:([^;]+);base64,([A-Za-z0-9+/=]*)$/)
+    const base64 = match ? match[2] : ""
+    const bytes = Math.floor((base64.length * 3) / 4)
+    return {
+      method,
+      mimeType: match ? match[1] : "",
+      imageBytes: bytes,
+      captureEmpty: bytes < 1024,
+      ...(bytes < 1024 ? { captureWarning: "captured image payload is empty or implausibly small" } : {}),
     }
   }
   
@@ -1799,64 +2096,133 @@ export function createToolDispatcher({
       throw new Error("At least one of text, selector, or urlContains is required")
     }
   
-    await ensureCdpAttached(tabId, "1.3")
     const startTime = Date.now()
-  
-    while (Date.now() - startTime < timeoutMs) {
-      if (urlContains) {
-        const tab = await chrome.tabs.get(tabId)
-        if (tab.url && tab.url.includes(urlContains)) {
-          return buildWaitForSuccess(
-            session,
-            { text, selector, urlContains, timeoutMs },
-            { found: true, condition: "urlContains", value: urlContains },
-            Date.now() - startTime
-          )
-        }
-      }
-  
-      if (text || selector) {
-        const expression = `(() => {
-          const roots = [document];
-          const seen = new Set();
-          for (let index = 0; index < roots.length; index += 1) {
-            const root = roots[index];
-            if (!root || seen.has(root)) continue;
-            seen.add(root);
-            ${selector ? `const el = root.querySelector?.(${JSON.stringify(selector)}); if (el) { const rect = el.getBoundingClientRect(); if (rect.width > 0 && rect.height > 0) return { found: 'selector', selector: ${JSON.stringify(selector)} }; }` : ""}
-            ${text ? `const textSurface = root.body || root; const rootText = textSurface.innerText || root.textContent || ''; if (rootText.includes(${JSON.stringify(text)})) return { found: 'text', text: ${JSON.stringify(text)} };` : ""}
-            for (const node of root.querySelectorAll?.('*') || []) {
-              if (node.shadowRoot) roots.push(node.shadowRoot);
-              if (node.tagName === 'IFRAME') {
-                try {
-                  if (node.contentDocument) roots.push(node.contentDocument);
-                } catch {}
-              }
-            }
-          }
-          return null;
-        })()`
-  
-        const result = await chromeDebuggerSendCommand(
-          { tabId },
-          "Runtime.evaluate",
-          { expression, returnByValue: true }
-        )
-
-        if (result?.result?.value) {
-          return buildWaitForSuccess(
-            session,
-            { text, selector, urlContains, timeoutMs },
-            result.result.value,
-            Date.now() - startTime
-          )
-        }
-      }
-  
-      await delayCdp(200)
+    const deadlineAt = startTime + timeoutMs
+    const waiters = []
+    // The page waiter also covers client-side route changes, which never reach the
+    // tab-update listener; the background waiter below covers full navigations.
+    waiters.push(waitForPageCondition(tabId, { text, selector, urlContains }, deadlineAt))
+    if (urlContains) {
+      waiters.push(waitForUrlMatch(tabId, urlContains, deadlineAt))
     }
-  
-    return buildWaitForTimeout(session, { text, selector, urlContains, timeoutMs }, timeoutMs)
+
+    const match = await firstWaitMatch(waiters, deadlineAt)
+    if (!match) {
+      return buildWaitForTimeout(session, { text, selector, urlContains, timeoutMs }, timeoutMs)
+    }
+    return buildWaitForSuccess(
+      session,
+      { text, selector, urlContains, timeoutMs },
+      match,
+      Date.now() - startTime
+    )
+  }
+
+  // The DOM wait runs inside the page: the observer subscribes to mutations and
+  // walks open shadow roots plus same-origin iframes, so the background no longer
+  // attaches the debugger or polls Runtime.evaluate every 200 ms.
+  async function waitForPageCondition(tabId, payload, deadlineAt) {
+    try {
+      return normalizeWaitMatch(await sendContentWait(tabId, withRemainingWait(payload, deadlineAt)))
+    } catch {
+      // A navigation, extension reload, or missing injection can drop the
+      // content runtime; recover it once, then retry before giving up.
+      await ensureTabRegistered(tabId, { reason: "wait_for_recovery" }).catch(() => null)
+      if (deadlineAt - Date.now() <= 0) return null
+      return normalizeWaitMatch(await sendContentWait(tabId, withRemainingWait(payload, deadlineAt)))
+    }
+  }
+
+  // The page-side wait must never outlive the tool deadline, including after a
+  // recovery retry, or it would keep a message channel open past the timeout.
+  function withRemainingWait(payload, deadlineAt) {
+    return {
+      ...payload,
+      timeoutMs: Math.max(100, Math.min(30000, deadlineAt - Date.now())),
+    }
+  }
+
+  function sendContentWait(tabId, payload) {
+    return chrome.tabs.sendMessage(tabId, {
+      type: "yunti_execute_tool",
+      tool: "yunti_wait_for",
+      arguments: payload,
+    })
+  }
+
+  function normalizeWaitMatch(response) {
+    if (!response || typeof response !== "object") return null
+    if (response.ok === false && response.error) throw new Error(response.error)
+    return response.found ? response : null
+  }
+
+  // URL waits live in the background so they survive navigation, and they are
+  // event-driven instead of polled.
+  function waitForUrlMatch(tabId, urlContains, deadlineAt) {
+    return new Promise((resolve) => {
+      let settled = false
+      const target = Number(tabId)
+      const match = { found: true, condition: "urlContains", value: urlContains }
+      const finish = (value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        try {
+          chrome.tabs?.onUpdated?.removeListener?.(listener)
+        } catch {}
+        resolve(value)
+      }
+      const listener = (updatedTabId, _changeInfo, tab) => {
+        if (Number(updatedTabId) !== target) return
+        if (String(tab?.url || "").includes(urlContains)) finish(match)
+      }
+      const timer = setTimeout(() => finish(null), Math.max(0, deadlineAt - Date.now()))
+      try {
+        chrome.tabs?.onUpdated?.addListener?.(listener)
+      } catch {}
+      Promise.resolve(chrome.tabs.get(tabId)).then(
+        (tab) => {
+          if (String(tab?.url || "").includes(urlContains)) finish(match)
+        },
+        () => {}
+      )
+    })
+  }
+
+  function firstWaitMatch(waiters, deadlineAt) {
+    if (!waiters.length) return Promise.resolve(null)
+    return new Promise((resolve, reject) => {
+      let settled = false
+      let pending = waiters.length
+      let firstError = null
+      const finish = (value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(value)
+      }
+      const fail = (error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(error)
+      }
+      const timer = setTimeout(() => finish(null), Math.max(0, deadlineAt - Date.now()))
+      for (const waiter of waiters) {
+        Promise.resolve(waiter).then(
+          (value) => {
+            pending -= 1
+            if (value) finish(value)
+            else if (pending === 0) finish(null)
+          },
+          (error) => {
+            pending -= 1
+            if (!firstError) firstError = error instanceof Error ? error : new Error(String(error))
+            if (pending === 0) fail(firstError)
+          }
+        )
+      }
+    })
   }
 
   function buildWaitForTarget({ text, selector, urlContains, timeoutMs } = {}) {
@@ -1914,14 +2280,59 @@ export function createToolDispatcher({
     const action = String(args.action || "accept").trim()
     if (action !== "accept" && action !== "dismiss") throw new Error("action must be 'accept' or 'dismiss'")
     const promptText = action === "accept" ? String(args.promptText || "") : undefined
-  
+    const known = cdp?.dialogState?.(tabId) || null
+
     await ensureCdpAttached(tabId, "1.3")
-    await chromeDebuggerSendCommand(
-      { tabId },
-      "Page.handleJavaScriptDialog",
-      { accept: action === "accept", promptText }
-    )
-    return { handled: true, action, browserSessionId: session.browserSessionId }
+    try {
+      await chromeDebuggerSendCommand(
+        { tabId },
+        "Page.handleJavaScriptDialog",
+        { accept: action === "accept", promptText }
+      )
+    } catch (error) {
+      const message = error?.message || String(error)
+      if (/no dialog is showing/i.test(message)) {
+        // Nothing to handle is a normal outcome, not a tool failure: the page
+        // may have auto-dismissed the dialog (background tabs do this).
+        cdp?.clearDialogState?.(tabId)
+        return {
+          handled: false,
+          action,
+          reason: "no_dialog_open",
+          code: "NO_DIALOG",
+          ok: true,
+          recoverable: false,
+          browserSessionId: session.browserSessionId,
+          nextStepHint: "No modal dialog was open on this tab; continue with the page workflow.",
+        }
+      }
+      return {
+        handled: false,
+        action,
+        reason: "dialog_not_handled",
+        code: "DIALOG_NOT_HANDLED",
+        ok: false,
+        recoverable: true,
+        browserSessionId: session.browserSessionId,
+        failedStage: "Page.handleJavaScriptDialog",
+        message,
+        recoveryHint: {
+          reason: "dialog-handle-failed",
+          nextAction: "verify_page_state_then_retry",
+          recommendedTools: ["yunti_get_page_snapshot", "yunti_handle_dialog"],
+        },
+      }
+    }
+    cdp?.clearDialogState?.(tabId)
+    return {
+      handled: true,
+      action,
+      browserSessionId: session.browserSessionId,
+      resolvedKnownDialog: Boolean(known),
+      dialogType: known?.type || null,
+      ok: true,
+      recoverable: false,
+    }
   }
   
   async function resizePage(tabId, session, args = {}) {

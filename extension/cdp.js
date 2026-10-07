@@ -1,11 +1,83 @@
+// A single CDP round trip (attach, domain enable, mouse dispatch, screenshot)
+// must never be able to hold a tab's execution lane forever. On timeout the
+// attach bookkeeping is dropped so the next call re-attaches instead of talking
+// to a dead debugger session.
+const DEFAULT_CDP_COMMAND_TIMEOUT_MS = 10_000
+
 export function createCdpController({
   sessionsByTab,
   postBridge,
   forwardConsoleEvent,
+  commandTimeoutMs = DEFAULT_CDP_COMMAND_TIMEOUT_MS,
+  onDialogEvent = null,
 }) {
   const cdpAttachedTabs = new Set()
   const cdpEnabledDomains = new Map()
   const traceBuffers = new Map()
+  // tabId -> { message, type, openedAt }. A native modal freezes the renderer's
+  // JS thread, so while this entry exists the tab cannot answer page tools.
+  const openDialogsByTab = new Map()
+  // tabId -> { openedAtMs, closedAtMs, type }. Lets a tool that already returned
+  // still report "a dialog opened while I was running" even when the browser
+  // auto-dismissed it in a few milliseconds (headless/background tabs do this).
+  const dialogActivityByTab = new Map()
+
+  function dialogState(tabId) {
+    const dialog = openDialogsByTab.get(Number(tabId))
+    if (!dialog) return null
+    return { ...dialog }
+  }
+
+  function clearDialogState(tabId) {
+    openDialogsByTab.delete(Number(tabId))
+  }
+
+  function lastDialogActivity(tabId) {
+    const activity = dialogActivityByTab.get(Number(tabId))
+    return activity ? { ...activity } : null
+  }
+
+  // tabId -> Set<listener> for dialog-open notifications.
+  const dialogOpenListeners = new Map()
+
+  function notifyDialogOpen(tabId) {
+    const listeners = dialogOpenListeners.get(Number(tabId))
+    if (!listeners) return
+    dialogOpenListeners.delete(Number(tabId))
+    for (const listener of listeners) {
+      try {
+        listener()
+      } catch {
+        // never let a listener break the event forwarder
+      }
+    }
+  }
+
+  // Resolves as soon as a native modal opens on the tab, or after waitMs with
+  // null. Lets page tools bail out of a modal deadlock instead of blocking
+  // until the operation timeout.
+  function waitForDialogOpen(tabId, waitMs = 3_000) {
+    const id = Number(tabId)
+    if (!Number.isFinite(id) || id <= 0) return Promise.resolve(null)
+    if (openDialogsByTab.has(id)) return Promise.resolve(dialogState(id))
+    return new Promise((resolve) => {
+      let settled = false
+      const finish = (value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        const listeners = dialogOpenListeners.get(id)
+        if (listeners) {
+          listeners.delete(finish)
+          if (!listeners.size) dialogOpenListeners.delete(id)
+        }
+        resolve(value)
+      }
+      const timer = setTimeout(() => finish(null), Math.max(100, Number(waitMs) || 0))
+      if (!dialogOpenListeners.has(id)) dialogOpenListeners.set(id, new Set())
+      dialogOpenListeners.get(id).add(finish)
+    })
+  }
 
   function installCdpEventForwarder() {
     if (!chrome.debugger?.onEvent || !chrome.debugger?.onDetach) return
@@ -13,7 +85,50 @@ export function createCdpController({
       const tabId = source?.tabId
       if (!tabId) return
       const session = sessionsByTab.get(tabId)
+
+      if (method === "Page.javascriptDialogOpening") {
+        const openedAtMs = Date.now()
+        openDialogsByTab.set(Number(tabId), {
+          message: String(params?.message || ""),
+          type: String(params?.type || "alert"),
+          openedAt: new Date(openedAtMs).toISOString(),
+        })
+        dialogActivityByTab.set(Number(tabId), {
+          openedAtMs,
+          closedAtMs: 0,
+          type: String(params?.type || "alert"),
+        })
+        void postBridge("/extension/cdp-event", {
+          browserSessionId: session?.browserSessionId || "",
+          tabId,
+          method,
+          params: { type: params?.type || "alert", hasMessage: Boolean(params?.message) },
+          receivedAt: new Date().toISOString(),
+        }).catch(() => {})
+        if (typeof onDialogEvent === "function") onDialogEvent("opened", tabId, session || null, params || {})
+        notifyDialogOpen(tabId)
+        return
+      }
+      if (method === "Page.javascriptDialogClosed") {
+        openDialogsByTab.delete(Number(tabId))
+        const previous = dialogActivityByTab.get(Number(tabId))
+        dialogActivityByTab.set(Number(tabId), {
+          openedAtMs: previous?.openedAtMs || 0,
+          closedAtMs: Date.now(),
+          type: previous?.type || "alert",
+        })
+        void postBridge("/extension/cdp-event", {
+          browserSessionId: session?.browserSessionId || "",
+          tabId,
+          method,
+          params: { result: params?.result ?? null, userInput: undefined },
+          receivedAt: new Date().toISOString(),
+        }).catch(() => {})
+        if (typeof onDialogEvent === "function") onDialogEvent("closed", tabId, session || null, params || {})
+        return
+      }
       if (!session) return
+
       recordTraceEvent(tabId, method, params)
       void postBridge("/extension/cdp-event", {
         browserSessionId: session.browserSessionId,
@@ -33,6 +148,7 @@ export function createCdpController({
       cdpAttachedTabs.delete(tabId)
       cdpEnabledDomains.delete(tabId)
       traceBuffers.delete(tabId)
+      openDialogsByTab.delete(Number(tabId))
       const session = sessionsByTab.get(tabId)
       if (!session) return
       void postBridge("/extension/cdp-event", {
@@ -513,13 +629,48 @@ export function createCdpController({
   }
 
   function chromeDebuggerSendCommand(target, method, params) {
-    return new Promise((resolve, reject) => {
-      chrome.debugger.sendCommand(target, method, params, (result) => {
-        const error = chrome.runtime.lastError
-        if (error) reject(new Error(error.message))
-        else resolve(result)
-      })
-    })
+    return withCommandTimeout(
+      new Promise((resolve, reject) => {
+        chrome.debugger.sendCommand(target, method, params, (result) => {
+          const error = chrome.runtime.lastError
+          if (error) reject(new Error(error.message))
+          else resolve(result)
+        })
+      }),
+      target,
+      method
+    )
+  }
+
+  function withCommandTimeout(promise, target, method) {
+    // Floor kept low so tests and heavily throttled environments can use short
+    // budgets; the production default is 10s.
+    const timeoutMs = Math.max(250, Number(commandTimeoutMs) || DEFAULT_CDP_COMMAND_TIMEOUT_MS)
+    let timer = null
+    return Promise.race([
+      promise.then((value) => {
+        if (timer) clearTimeout(timer)
+        return value
+      }),
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const tabId = Number(target?.tabId)
+          if (Number.isFinite(tabId) && tabId > 0) {
+            // The debugger session is no longer trustworthy: drop the attach
+            // bookkeeping so the next call re-attaches instead of reusing a
+            // session whose command never came back.
+            cdpAttachedTabs.delete(tabId)
+            cdpEnabledDomains.delete(tabId)
+          }
+          reject(
+            new Error(
+              `YUNTI_CDP_TIMEOUT ${method} did not answer within ${timeoutMs}ms on tab ${tabId || "unknown"}. ` +
+                `retryable=true retryBudget=1 recoveryAction=verify_page_state_then_retry`
+            )
+          )
+        }, timeoutMs)
+      }),
+    ])
   }
 
   async function startPerformanceTrace(tabId, session, args = {}) {
@@ -591,14 +742,18 @@ export function createCdpController({
 
   return {
     chromeDebuggerSendCommand,
+    clearDialogState,
     delayCdp,
     detachCdpTab,
+    dialogState,
     ensureCdpAttached,
     getBrowserTarget,
     installCdpEventForwarder,
+    lastDialogActivity,
     listBrowserTargets,
     sendCdpCommand,
     startPerformanceTrace,
     stopPerformanceTrace,
+    waitForDialogOpen,
   }
 }

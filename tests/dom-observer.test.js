@@ -94,12 +94,16 @@ function createDocument(elements, options = {}) {
       scrollLeft: options.scrollX || 0,
       scrollTop: options.scrollY || 0,
     },
-    body: {},
+    body: options.bodyText
+      ? { innerText: options.bodyText, textContent: options.bodyText }
+      : {},
     querySelector(selector) {
       const labelFor = selector.match(/^label\[for="(.+)"\]$/)?.[1]
       if (labelFor && labels.has(labelFor)) {
         return { innerText: labels.get(labelFor), textContent: labels.get(labelFor) }
       }
+      const id = selector.match(/^#([\w-]+)$/)?.[1]
+      if (id) return elements.find((element) => element?.id === id) || null
       return null
     },
     querySelectorAll(selector) {
@@ -114,11 +118,15 @@ function createShadowRoot(elements, options = {}) {
     host: options.host || null,
     querySelector(selector) {
       const labelFor = selector.match(/^label\[for="(.+)"\]$/)?.[1]
-      if (!labelFor) return null
-      return elements.find((element) => {
-        if (element.tagName?.toLowerCase?.() !== "label") return false
-        return element.getAttribute("for") === labelFor
-      }) || null
+      if (labelFor) {
+        return elements.find((element) => {
+          if (element.tagName?.toLowerCase?.() !== "label") return false
+          return element.getAttribute("for") === labelFor
+        }) || null
+      }
+      const id = selector.match(/^#([\w-]+)$/)?.[1]
+      if (id) return flattenElements(elements).find((element) => element?.id === id) || null
+      return null
     },
     querySelectorAll(selector) {
       if (selector === "body *") return flattenElements(elements)
@@ -156,8 +164,29 @@ function isInteractiveFakeElement(element) {
   )
 }
 
-function loadObserver({ document, location, viewport = {}, sessionId = "tab-1" }) {
+function loadObserver({ document, location, viewport = {}, sessionId = "tab-1", onContext } = {}) {
   const source = readFileSync(resolve("extension/dom-observer.js"), "utf8")
+  const observers = []
+  class FakeMutationObserver {
+    constructor(callback) {
+      this.callback = callback
+      this.disconnected = false
+      observers.push(this)
+    }
+
+    observe(target, options) {
+      this.target = target
+      this.options = options
+    }
+
+    disconnect() {
+      this.disconnected = true
+    }
+
+    trigger() {
+      if (!this.disconnected) this.callback([])
+    }
+  }
   const context = {
     document,
     location,
@@ -172,10 +201,17 @@ function loadObserver({ document, location, viewport = {}, sessionId = "tab-1" }
     __YUNTI_BROWSER_SESSION_ID__: sessionId,
     CSS: { escape: (value) => String(value) },
     getComputedStyle: (element) => element.style || {},
+    MutationObserver: FakeMutationObserver,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
   }
   context.globalThis = context
   vm.createContext(context)
   vm.runInContext(source, context, { filename: "extension/dom-observer.js" })
+  context.__testObservers = observers
+  onContext?.(context)
   return context.YuntiBrowserRuntimeObserver
 }
 
@@ -649,6 +685,130 @@ test("DOM observer includes same-origin iframe interactive targets in observe an
   const inputMatches = observer.findElements({ placeholder: "child", tag: "input" })
   assert.equal(inputMatches.matchCount, 1)
   assert.equal(inputMatches.matches[0].name, "Child search")
+})
+
+test("DOM observer wait resolves an already-satisfied selector without touching the background", async () => {
+  const ready = new FakeElement("button", { id: "ready" }, {
+    innerText: "Ready",
+    rect: { x: 10, y: 10, width: 90, height: 32 },
+  })
+  const observer = loadObserver({
+    document: createDocument([ready], { pageHeight: 600, viewportHeight: 600 }),
+    location: new URL("https://example.test/wait-immediate"),
+  })
+
+  const match = await observer.waitForCondition({ selector: "#ready", timeoutMs: 1000 })
+
+  assert.equal(match.found, "selector")
+  assert.equal(match.selector, "#ready")
+  assert.equal(match.waitedMs, 0)
+})
+
+test("DOM observer wait resolves from a mutation before the deadline", async () => {
+  const elements = []
+  const document = createDocument(elements, { pageHeight: 600, viewportHeight: 600 })
+  let context = null
+  const observer = loadObserver({
+    document,
+    location: new URL("https://example.test/wait-mutation"),
+    onContext: (value) => {
+      context = value
+    },
+  })
+
+  const pending = observer.waitForCondition({ selector: "#late-target", timeoutMs: 5000 })
+  elements.push(new FakeElement("div", { id: "late-target" }, {
+    rect: { x: 0, y: 0, width: 120, height: 40 },
+  }))
+  context.__testObservers.at(-1).trigger()
+
+  const match = await pending
+  assert.equal(match.found, "selector")
+  assert.equal(match.selector, "#late-target")
+  assert.ok(match.waitedMs < 5000, `expected a mutation-driven match, got waitedMs=${match.waitedMs}`)
+  assert.equal(context.__testObservers.at(-1).disconnected, true)
+})
+
+test("DOM observer wait traverses open shadow roots and same-origin iframes", async () => {
+  const shadowHost = new FakeElement("div", { id: "shadow-host" }, {
+    rect: { x: 0, y: 0, width: 300, height: 120 },
+  })
+  shadowHost.shadowRoot = createShadowRoot([
+    new FakeElement("button", { id: "shadow-ready" }, {
+      innerText: "Shadow ready",
+      rect: { x: 10, y: 10, width: 110, height: 32 },
+    }),
+  ], { host: shadowHost })
+  const childDocument = createDocument([], { bodyText: "Frame ready", pageHeight: 400, viewportHeight: 300 })
+  const frame = new FakeElement("iframe", { id: "child-frame" }, {
+    rect: { x: 120, y: 200, width: 320, height: 260 },
+    contentDocument: childDocument,
+  })
+  const observer = loadObserver({
+    document: createDocument([shadowHost, frame], { pageHeight: 900, viewportHeight: 600 }),
+    location: new URL("https://example.test/wait-deep"),
+  })
+
+  const shadowMatch = await observer.waitForCondition({ selector: "#shadow-ready", timeoutMs: 1000 })
+  assert.equal(shadowMatch.found, "selector")
+  assert.equal(shadowMatch.selector, "#shadow-ready")
+
+  const iframeMatch = await observer.waitForCondition({ text: "Frame ready", timeoutMs: 1000 })
+  assert.equal(iframeMatch.found, "text")
+  assert.equal(iframeMatch.text, "Frame ready")
+})
+
+test("DOM observer wait resolves null once the deadline passes", async () => {
+  let context = null
+  const observer = loadObserver({
+    document: createDocument([], { pageHeight: 600, viewportHeight: 600 }),
+    location: new URL("https://example.test/wait-timeout"),
+    onContext: (value) => {
+      context = value
+    },
+  })
+
+  const match = await observer.waitForCondition({ text: "never appears", timeoutMs: 100 })
+
+  assert.equal(match, null)
+  assert.equal(context.__testObservers.at(-1).disconnected, true)
+})
+
+test("DOM observer wait matches a client-side URL change", async () => {
+  const location = new URL("https://example.test/start")
+  const observer = loadObserver({
+    document: createDocument([], { pageHeight: 600, viewportHeight: 600 }),
+    location,
+  })
+
+  const pending = observer.waitForCondition({ urlContains: "/dashboard", timeoutMs: 5000 })
+  location.href = "https://example.test/dashboard"
+
+  const match = await pending
+  assert.equal(match.found, true)
+  assert.equal(match.condition, "urlContains")
+  assert.equal(match.value, "/dashboard")
+})
+
+test("DOM observer cancels pending waits when the page runtime is torn down", async () => {
+  const elements = []
+  const document = createDocument(elements, { pageHeight: 600, viewportHeight: 600 })
+  const observer = loadObserver({
+    document,
+    location: new URL("https://example.test/wait-cancel"),
+  })
+
+  const pending = observer.waitForCondition({ selector: "#late", timeoutMs: 5000 })
+  assert.equal(observer.cancelPendingWaits(), 1)
+
+  const match = await pending
+  assert.equal(match, null)
+
+  // A later DOM change must not resurrect the cancelled subscription.
+  elements.push(new FakeElement("div", { id: "late" }, {
+    rect: { x: 0, y: 0, width: 10, height: 10 },
+  }))
+  assert.equal(observer.cancelPendingWaits(), 0)
 })
 
 test("DOM observer delta response returns a lighter change summary without full elements payload", () => {

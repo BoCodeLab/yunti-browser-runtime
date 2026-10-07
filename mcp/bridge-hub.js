@@ -17,6 +17,9 @@ const MAX_CDP_EVENTS = 2000
 const MAX_CONSOLE_MESSAGES = 1000
 const MAX_ACTIVITY_EVENTS = 100
 const MAX_MEMORY_ITEMS = 500
+// Page sessions are fanned out from the controller heartbeat only on every Nth
+// poll; their TTL is orders of magnitude larger than one poll cycle.
+const CONTROLLER_PAGE_SWEEP_INTERVAL = 5
 export const DEFAULT_SESSION_TTL_MS = Number(
   process.env.YUNTI_BROWSER_SESSION_TTL_MS || 90_000
 )
@@ -1281,7 +1284,14 @@ export class BridgeHub {
     }
     this.refreshSession(session)
     if (isBrowserControllerSession(session)) {
-      this.refreshPageSessionsForController(session)
+      // Page-session fan-out is an O(sessions) sweep. The controller poll cycle
+      // is the hottest path in the runtime, so run the sweep on a cadence
+      // instead of on every cycle: page TTLs are far longer than one cycle, and
+      // a stale tab is still detected on the next sweep.
+      session.pageSweepCounter = Number(session.pageSweepCounter || 0) + 1
+      if (session.pageSweepCounter % CONTROLLER_PAGE_SWEEP_INTERVAL === 0) {
+        this.refreshPageSessionsForController(session)
+      }
     }
     if (signal?.aborted) return { type: "noop", id: randomUUID(), aborted: true }
     while (session.queue.length > 0) {
