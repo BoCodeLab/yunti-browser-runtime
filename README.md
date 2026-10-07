@@ -6,7 +6,7 @@
 
 本地优先 · MCP 原生 · Content Script + CDP 双通道 · 无远程账号依赖
 
-[![npm version](https://img.shields.io/npm/v/yunti-browser-runtime?color=cb3837&label=npm)](https://www.npmjs.com/package/yunti-browser-runtime)
+[![install](https://img.shields.io/badge/install-from%20GitHub%20source-2ea44f)](docs/INSTALL_FROM_GIT.md)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=node.js&logoColor=white)](package.json)
 [![MCP](https://img.shields.io/badge/MCP-52_tools-111111)](docs/TOOL_GUIDE.md)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
@@ -121,7 +121,7 @@ PowerShell 下对应写法为 `Join-Path (npm root -g) "yunti-browser-runtime/ex
 3. 点击“加载已解压的扩展程序”。
 4. 选择上面输出的 `extension` 目录。
 
-Chrome / Edge 不允许 npm 静默安装未上架扩展，因此这一步需要用户在浏览器中确认。
+Chrome / Edge 不允许静默安装未上架扩展，因此这一步需要用户在浏览器中确认。
 加载完成后，扩展会自动连接 `http://127.0.0.1:48887`、维护 controller 心跳并按需
 接入可访问页面。默认不需要填写 token、打开 popup、保存设置或手动刷新页面。
 
@@ -146,28 +146,33 @@ Agent 应能看到 Chrome / Edge 的可访问标签页，并可直接使用 `tab
 
 ## 交给 Agent 安装
 
-不想自己逐步配置时，把下面整段复制给 Agent：
+不想自己逐步配置时，把下面整段复制给 Agent。提示词默认走 GitHub 源码安装；
+如果你更想用 npm 全局安装，把第 2、3 步换成 `npm install -g yunti-browser-runtime`，
+并把后续的 `npm run <命令>` 换成 `yunti-browser-runtime <命令>`。
 
 <details>
 <summary><strong>展开安装引导提示词</strong></summary>
 
 ```text
-请帮我安装并接入 Yunti Browser Runtime。它是一个本地浏览器运行时，让你通过 MCP 操作我本机 Chrome/Edge 页面。
+请帮我从 GitHub 源码安装并接入 Yunti Browser Runtime。它是一个本地浏览器运行时，让你通过 MCP 操作我本机 Chrome/Edge 页面。
 
 请按步骤引导并尽可能替我执行命令，不要跳步：
 
-1. 确认本机有 Node.js 22+。
-2. 执行：npm install -g yunti-browser-runtime
-3. 执行：yunti-browser-runtime print-config -- --agent 当前Agent名称 --human
-4. 根据输出把 MCP server 配置加入当前 Agent；如果输出包含 skill 安装命令，替我执行。当前 Agent 不支持 SKILL.md 时，把 skill 内容加入项目或系统指令。
-5. 告诉我 MCP server 会自动启动本地 Bridge，一般不需要单独运行 bridge。
-6. 输出扩展目录：$(npm root -g)/yunti-browser-runtime/extension
-7. 只有浏览器“加载已解压的扩展程序”这一步需要我确认：引导我打开 chrome://extensions 或 edge://extensions，开启开发者模式并选择该目录。
-8. 告诉我默认 Bridge URL 是 http://127.0.0.1:48887，本地默认不需要 token，不需要打开 popup、保存设置或刷新页面。
-9. 执行：yunti-browser-runtime doctor
-10. doctor 正常后调用 yunti_list_browser_targets；选择目标页面并调用 yunti_get_page_snapshot 或 yunti_observe_page 验证控制能力。
+1. 确认本机有 Node.js 22+ 和 git。
+2. 让我选一个固定目录来放仓库（例如 Windows 的 D:\tools\yunti-browser-runtime，或 macOS/Linux 的 ~/tools/yunti-browser-runtime），不要放进临时目录，然后执行：
+   git clone https://github.com/BoCodeLab/yunti-browser-runtime.git
+3. 进入仓库目录，执行：npm install
+   并告诉我这一步是可选的：运行时（MCP server、本地 Bridge、CLI、浏览器扩展）没有任何第三方依赖，跳过也能正常使用，装上的 playwright-core 只服务于真实浏览器 E2E 与耐久测试。
+4. 执行：npm run print-config -- --agent 当前Agent名称 --human
+5. 根据输出把 MCP server 配置加入当前 Agent；如果输出包含 skill 安装命令，替我执行。当前 Agent 不支持 SKILL.md 时，把 skill 内容加入项目或系统指令。
+6. 告诉我 MCP server 会自动启动本地 Bridge，一般不需要单独运行 bridge。
+7. 输出扩展目录：<克隆目录>/extension（源码安装不会注册全局命令 yunti-browser-runtime，后续命令统一用 npm run <命令> 形式）。
+8. 只有浏览器“加载已解压的扩展程序”这一步需要我确认：引导我打开 chrome://extensions 或 edge://extensions，开启开发者模式并选择该目录。
+9. 告诉我默认 Bridge URL 是 http://127.0.0.1:48887，本地默认不需要 token，不需要打开 popup、保存设置或刷新页面。
+10. 执行：npm run doctor
+11. doctor 正常后调用 yunti_list_browser_targets；选择目标页面并调用 yunti_get_page_snapshot 或 yunti_observe_page 验证控制能力。
 
-不要遗漏 packaged skill 的安装或接入。不要默认要求我刷新页面、切换标签、重启浏览器或填写 token。页面路由异常时先使用 controller、tabId/targetId 和结构化 recoveryAction 自动恢复；只有浏览器明确阻止注入且自动恢复失败时，才请求我处理。
+不要遗漏 packaged skill 的安装或接入。不要默认要求我刷新页面、切换标签、重启浏览器或填写 token。页面路由异常时先使用 controller、tabId/targetId 和结构化 recoveryAction 自动恢复；只有浏览器明确阻止注入且自动恢复失败时，才请求我处理。最后提醒我两件事：克隆目录不要移动或删除，因为 MCP 配置里写的是该目录的绝对路径；以后更新用 git pull，更新后要在浏览器扩展页点一次“重新加载”。
 ```
 
 </details>
@@ -260,6 +265,10 @@ observe / wait / screenshot / network / console → 验证结果
 [查看全部工具、参数规则和最小用例](docs/TOOL_GUIDE.md)
 
 ## CLI
+
+源码安装时把下面的命令写成 `npm run <命令>`（例如 `npm run doctor`、
+`npm run print-config -- --agent codex --human`）；npm 全局安装时直接使用
+`yunti-browser-runtime <命令>`：
 
 ```bash
 yunti-browser-runtime --help
