@@ -20,6 +20,55 @@ Install the Playwright Chromium binary once if it is not already available:
 npx playwright-core install chromium
 ```
 
+### When `playwright-core install` times out
+
+`playwright-core install chromium` aborts a request after 30 seconds. On networks
+where the Chrome-for-Testing CDN is slow or unreachable — both the default host and
+`PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright` have been
+observed timing out at that limit — download the archive with a client that
+tolerates long transfers, then unpack it where Playwright expects it.
+
+Step 1 — ask Playwright which path it wants (the build number changes between
+Playwright releases, so always read it from here instead of copying the example):
+
+```bash
+node -e "const {chromium}=require('playwright-core'); console.log(chromium.executablePath())"
+```
+
+That prints something like
+`<cache>/ms-playwright/chromium-<build>/chrome-win64/chrome.exe`, where `<cache>`
+is `%LOCALAPPDATA%` on Windows, `~/Library/Caches` on macOS and `~/.cache` on Linux.
+
+Step 2 — fetch the archive (about 195 MB) without the 30 second cap:
+
+```bash
+curl -L --max-time 1200 --retry 2 -o chrome-win64.zip \
+  https://cdn.npmmirror.com/binaries/playwright/builds/cft/153.0.8010.12/win64/chrome-win64.zip
+```
+
+Step 3 — unpack so that `chrome-win64/` lands directly under the
+`chromium-<build>` directory reported in step 1:
+
+```bash
+mkdir -p "$CACHE/ms-playwright/chromium-<build>"
+tar -xf chrome-win64.zip -C "$CACHE/ms-playwright/chromium-<build>"
+```
+
+Step 4 — confirm Playwright can see it:
+
+```bash
+node -e "const {chromium}=require('playwright-core'); console.log(require('fs').existsSync(chromium.executablePath()))"
+```
+
+`true` means the soak and E2E runners are ready.
+
+### Expect a browser window
+
+The runner starts a **visible** Chromium window and keeps it open for the whole
+15 minute run. That is the test browser, not your own Chrome or Edge: it uses a
+temporary profile and never touches your normal browsing profile. Do not close
+it while the test is running.
+
 Run the qualifying test from any writable directory:
 
 ```bash

@@ -339,6 +339,11 @@ npx playwright-core install chromium
 YUNTI_E2E=1 npm run test:e2e
 ```
 
+`playwright-core install` 对单次请求设了 30 秒上限，国内网络下经常直接超时。
+遇到时可以改用支持长连接的下载方式手动安装，步骤见
+[耐久测试文档的安装章节](docs/SOAK_TEST.md)。真实浏览器测试会弹出一个独立的
+Chromium 窗口，它使用临时 profile，不会影响你正在使用的浏览器。
+
 完整 15 分钟耐久测试：
 
 ```bash
