@@ -70,8 +70,13 @@ git fetch --tags
 git checkout v0.2.8
 ```
 
-Then reload the unpacked extension once from `chrome://extensions` or
-`edge://extensions` so the browser picks up extension version `0.2.8`.
+Two things must be refreshed together, otherwise `npm run doctor` reports a
+version mismatch — it compares the package, the running bridge, and the extension
+loaded in the browser:
+
+1. Restart the MCP server / bridge process. Reopening the agent session is enough.
+2. Reload the unpacked extension from `chrome://extensions` or
+   `edge://extensions` so the browser picks up extension version `0.2.8`.
 
 ## Compatibility
 

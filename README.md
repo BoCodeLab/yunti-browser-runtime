@@ -71,15 +71,14 @@ benchmark 通过 `38/38` 场景、`114` 次尝试和 `397` 次 MCP 调用；Edge
 Node.js 22 或更高版本：
 
 ```bash
-# 稳定版（推荐）：最新的发布 tag
-git clone --branch v0.2.8 https://github.com/BoCodeLab/yunti-browser-runtime.git
-
-# 开发版：跟随 main，包含尚未发布的改动
 git clone https://github.com/BoCodeLab/yunti-browser-runtime.git
-
 cd yunti-browser-runtime
+git checkout v0.2.8
 npm install
 ```
+
+想跟随开发版就跳过 `git checkout`，直接留在 `main` 分支（会包含尚未发布的改动）。
+检出 tag 后处于 detached HEAD 状态，这是正常的，更新时 checkout 新的 tag 即可。
 
 没有安装 git 时，可以从 [Releases](https://github.com/BoCodeLab/yunti-browser-runtime/releases)
 页下载 `Source code (zip)` 解压，内容与克隆完全一致。
@@ -144,9 +143,11 @@ git fetch --tags
 git checkout v0.2.8
 ```
 
-跟随 `main` 开发版时改用 `git pull`。更新后需要在 `chrome://extensions` 或
-`edge://extensions` 中点击本扩展的“重新加载”，浏览器才会使用新的扩展代码。
-MCP server 会在 Agent 下次建立会话时使用新代码。
+跟随 `main` 开发版时改用 `git pull`。更新后有两处要一起刷新，否则 `npm run doctor`
+会报版本不匹配（它会对比当前包、正在运行的 bridge 和浏览器里的扩展）：
+
+1. 重启 MCP server / bridge 进程 —— 让 Agent 重开会话即可。
+2. 在 `chrome://extensions` 或 `edge://extensions` 中点击本扩展的“重新加载”。
 
 如果更新后 `npm run doctor` 报协议或版本不匹配，先重新加载扩展，再重试。
 
