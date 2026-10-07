@@ -59,19 +59,43 @@ benchmark 通过 `38/38` 场景、`114` 次尝试和 `397` 次 MCP 调用；Edge
 
 ### 1. 安装 Runtime
 
+有两种安装方式，功能完全一致。
+
+**方式 A：从 GitHub 源码安装（推荐）**
+
+克隆仓库到固定目录后直接使用，不需要 npm 账号，浏览器扩展目录就在仓库内：
+
+```bash
+git clone https://github.com/BoCodeLab/yunti-browser-runtime.git
+cd yunti-browser-runtime
+npm install
+```
+
+请把仓库放在一个固定位置（例如 `D:\tools\yunti-browser-runtime`）。下一步生成的
+MCP 配置会写入该目录的绝对路径，目录被移动或删除后需要重新生成配置。
+
+**方式 B：npm 全局安装**
+
 要求 Node.js 22 或更高版本：
 
 ```bash
 npm install -g yunti-browser-runtime
 ```
 
-本地默认不需要 npm token，也不需要 Yunti 账号。
+两种方式都默认不需要 npm token，也不需要 Yunti 账号。后续步骤对两种方式都适用，
+区别只在命令写法：源码安装使用 `npm run <命令>`，npm 全局安装直接写
+`yunti-browser-runtime <命令>`。源码安装的完整说明见
+[从源码安装](docs/INSTALL_FROM_GIT.md)。
 
 ### 2. 接入你的 Agent
 
 让 CLI 针对 Agent 生成 MCP 配置和 skill 安装指引：
 
 ```bash
+# 源码安装
+npm run print-config -- --agent codex --human
+
+# npm 全局安装
 yunti-browser-runtime print-config -- --agent codex --human
 ```
 
@@ -81,11 +105,14 @@ yunti-browser-runtime print-config -- --agent codex --human
 
 ### 3. 加载浏览器扩展
 
-获取扩展目录：
+获取扩展目录。源码安装时就是仓库内的 `extension` 目录（例如
+`D:\tools\yunti-browser-runtime\extension`）；npm 全局安装时用：
 
 ```bash
 echo "$(npm root -g)/yunti-browser-runtime/extension"
 ```
+
+PowerShell 下对应写法为 `Join-Path (npm root -g) "yunti-browser-runtime/extension"`。
 
 然后完成一次浏览器侧加载：
 
@@ -101,6 +128,10 @@ Chrome / Edge 不允许 npm 静默安装未上架扩展，因此这一步需要�
 ### 4. 验证连接
 
 ```bash
+# 源码安装
+npm run doctor
+
+# npm 全局安装
 yunti-browser-runtime doctor
 ```
 
