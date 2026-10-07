@@ -149,6 +149,9 @@ git checkout v0.2.8
 1. 重启 MCP server / bridge 进程 —— 让 Agent 重开会话即可。
 2. 在 `chrome://extensions` 或 `edge://extensions` 中点击本扩展的“重新加载”。
 
+两步都做完 `npm run doctor` 仍报版本不匹配时，通常是旧的 bridge 进程还占着端口，见
+[FAQ](#faq) 里的排查步骤。
+
 如果更新后 `npm run doctor` 报协议或版本不匹配，先重新加载扩展，再重试。
 
 ## 交给 Agent 安装
@@ -415,6 +418,33 @@ DOM 页面适合 fresh uid 与语义动作；跨域 frame、Canvas、浏览器 t
 
 早期版本的 npm script 使用 POSIX 前置环境变量语法，在 cmd.exe 下无法解析。当前版本
 已改为跨平台的 `node scripts/bridge.js`。若仍报错，先 `git pull` 到最新版本。
+
+</details>
+
+<details>
+<summary><strong>升级后 npm run doctor 仍报 bridge 版本不匹配</strong></summary>
+
+`doctor` 会对比三处版本：当前包、正在运行的 bridge、浏览器里加载的扩展。如果重开了
+Agent 会话、也重新加载了扩展，版本却还停在旧的，通常是**还有一个旧版本的 bridge
+进程占着 `127.0.0.1:48887`**。新会话启动 MCP server 时发现端口被占用，会以 proxy
+模式连到那个旧进程，于是版本永远不更新 —— 这时必须先结束旧进程。
+
+Windows：
+
+```powershell
+Get-NetTCPConnection -LocalPort 48887 -State Listen |
+  Select-Object -ExpandProperty OwningProcess -Unique |
+  ForEach-Object { Stop-Process -Id $_ -Force }
+```
+
+macOS / Linux：
+
+```bash
+kill $(lsof -ti tcp:48887)
+```
+
+然后重开 Agent 会话，新的 MCP server 会以 owner 模式启动并加载当前版本。再跑
+`npm run doctor` 确认三处版本一致。
 
 </details>
 
