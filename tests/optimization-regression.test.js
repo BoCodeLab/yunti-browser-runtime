@@ -929,3 +929,80 @@ test("CDP command timeout rejects with YUNTI_CDP_TIMEOUT and forces a re-attach"
     globalThis.chrome = previousChrome
   }
 })
+
+// ---------------------------------------------------------------------------
+// 9. CDP attach survives a browser that is already attached
+// ---------------------------------------------------------------------------
+test("CDP attach recovers when the browser still holds the attachment", async () => {
+  const attachCalls = []
+  const previousChrome = globalThis.chrome
+  globalThis.chrome = {
+    runtime: { lastError: undefined },
+    debugger: {
+      attach: (target, protocolVersion, callback) => {
+        attachCalls.push({ tabId: target.tabId, protocolVersion })
+        // The service worker was evicted (or a CDP command timed out), so the
+        // in-memory set is empty while chrome.debugger is still attached to this
+        // tab on the browser side.
+        globalThis.chrome.runtime.lastError = {
+          message: `Another debugger is already attached to the tab with id: ${target.tabId}.`,
+        }
+        callback()
+        globalThis.chrome.runtime.lastError = undefined
+      },
+      detach: (_target, callback) => callback(),
+      sendCommand: (_target, method, _params, callback) => {
+        if (/\.enable$/.test(method)) callback({})
+      },
+    },
+  }
+  try {
+    const cdp = createCdpController({
+      sessionsByTab: new Map(),
+      postBridge: async () => {},
+      forwardConsoleEvent: () => {},
+    })
+    const first = await cdp.ensureCdpAttached(1, "1.3")
+    assert.equal(first.attached, true)
+    assert.equal(first.reused, false)
+    // The bookkeeping was repaired, so the following call reuses the attachment
+    // instead of hitting the same browser error again.
+    const second = await cdp.ensureCdpAttached(1, "1.3")
+    assert.equal(second.reused, true)
+    assert.equal(attachCalls.length, 1)
+  } finally {
+    globalThis.chrome = previousChrome
+  }
+})
+
+test("CDP attach still surfaces a real attach error", async () => {
+  const previousChrome = globalThis.chrome
+  globalThis.chrome = {
+    runtime: { lastError: undefined },
+    debugger: {
+      attach: (_target, _protocolVersion, callback) => {
+        globalThis.chrome.runtime.lastError = { message: "Cannot access a chrome:// URL" }
+        callback()
+        globalThis.chrome.runtime.lastError = undefined
+      },
+      detach: (_target, callback) => callback(),
+      sendCommand: (_target, _method, _params, callback) => callback({}),
+    },
+  }
+  try {
+    const cdp = createCdpController({
+      sessionsByTab: new Map(),
+      postBridge: async () => {},
+      forwardConsoleEvent: () => {},
+    })
+    await assert.rejects(
+      () => cdp.ensureCdpAttached(1, "1.3"),
+      (error) => {
+        assert.match(error.message, /Cannot access a chrome:\/\/ URL/)
+        return true
+      }
+    )
+  } finally {
+    globalThis.chrome = previousChrome
+  }
+})

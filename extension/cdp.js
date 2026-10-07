@@ -576,7 +576,21 @@ export function createCdpController({
       await ensureCdpDomains(tabId, ["Page", "Runtime", "Log"])
       return { attached: false, reused: true, protocolVersion }
     }
-    await chromeDebuggerAttach({ tabId }, protocolVersion)
+    try {
+      await chromeDebuggerAttach({ tabId }, protocolVersion)
+    } catch (error) {
+      // The in-memory bookkeeping can fall out of sync with the browser while the
+      // tab stays attached to this extension. Two paths lead there: an MV3
+      // service worker is evicted after ~30s idle and loses cdpAttachedTabs, and
+      // a timed-out CDP command drops its entry without actually detaching.
+      // Re-attaching then fails with the browser's own "Another debugger is
+      // already attached", which is not a real failure for this extension:
+      // recognize it and keep using the attachment instead of failing every
+      // later CDP call on that tab.
+      if (!/another debugger is already attached/i.test(String(error?.message || ""))) {
+        throw error
+      }
+    }
     cdpAttachedTabs.add(tabId)
     await ensureCdpDomains(tabId, ["Page", "Runtime", "Log"])
     return { attached: true, reused: false, protocolVersion }
