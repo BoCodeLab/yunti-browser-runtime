@@ -43,6 +43,9 @@ const cdpResponses = options.cdpResponses ? [...options.cdpResponses] : null
       key: String(message.arguments?.key || ""),
       valueChanged: false,
     }),
+    // The wait is served inside the page, so a default miss keeps the existing
+    // timeout tests meaningful unless a test overrides the response.
+    yunti_wait_for: () => null,
   }
   const contentToolResponses = { ...defaultContentToolResponses, ...(options.contentToolResponses || {}) }
   const originalChrome = globalThis.chrome
@@ -63,6 +66,7 @@ const cdpResponses = options.cdpResponses ? [...options.cdpResponses] : null
     },
   ]
   let observeIndex = 0
+  const tabUpdatedListeners = new Set()
 
   globalThis.chrome = {
     tabs: {
@@ -87,6 +91,10 @@ const cdpResponses = options.cdpResponses ? [...options.cdpResponses] : null
           return typeof response === "function" ? response(message) : response
         }
         throw new Error(`unexpected content message: ${message.tool}`)
+      },
+      onUpdated: {
+        addListener: (listener) => tabUpdatedListeners.add(listener),
+        removeListener: (listener) => tabUpdatedListeners.delete(listener),
       },
     },
   }
@@ -131,10 +139,14 @@ const cdpResponses = options.cdpResponses ? [...options.cdpResponses] : null
     cdpCommands,
     cdpDispatches,
     dispatcher,
+    emitTabUpdated: (tabId, changeInfo, tab) => {
+      for (const listener of [...tabUpdatedListeners]) listener(tabId, changeInfo, tab)
+    },
     ensureRegistrationCalls,
     posted,
     sessionsByTab,
     restore: () => {
+      tabUpdatedListeners.clear()
       globalThis.chrome = originalChrome
     },
     sentMessages,
@@ -2216,16 +2228,9 @@ test("fill form preserves aggregate fields with structured result", async () => 
 
 test("wait_for selector success returns structured result fields", async () => {
   const harness = createDispatcherHarness({
-    cdpResponses: [
-      {
-        result: {
-          value: {
-            found: "selector",
-            selector: "#ready",
-          },
-        },
-      },
-    ],
+    contentToolResponses: {
+      yunti_wait_for: () => ({ found: "selector", selector: "#ready", waitedMs: 12 }),
+    },
   })
   const session = { browserSessionId: "tab-1", userId: "local", url: "https://example.test/" }
 
@@ -2246,41 +2251,48 @@ test("wait_for selector success returns structured result fields", async () => {
     assert.equal(result.ok, true)
     assert.equal(result.recoverable, false)
     assert.match(result.nextStepHint, /yunti_observe_page/)
-    assert.equal(harness.cdpCommands.at(-1).method, "Runtime.evaluate")
+    // The wait is served inside the page, so no debugger attach or CDP polling
+    // may happen on the normal path.
+    assert.equal(harness.cdpCommands.length, 0)
+    const waitMessage = harness.sentMessages.find((entry) => entry.message.tool === "yunti_wait_for")
+    assert.equal(waitMessage.tabId, 123)
+    assert.equal(waitMessage.message.arguments.text, "")
+    assert.equal(waitMessage.message.arguments.selector, "#ready")
+    assert.ok(waitMessage.message.arguments.timeoutMs > 0)
+    assert.ok(waitMessage.message.arguments.timeoutMs <= 1000)
   } finally {
     harness.restore()
   }
 })
 
-test("wait_for traverses open shadow roots and same-origin iframe documents", async () => {
+test("wait_for recovers the page runtime once when the content script is gone", async () => {
+  let attempts = 0
   const harness = createDispatcherHarness({
-    cdpResponses: [
-      {
-        result: {
-          value: {
-            found: "text",
-            text: "Deep ready",
-          },
-        },
+    contentToolResponses: {
+      yunti_wait_for: () => {
+        attempts += 1
+        if (attempts === 1) {
+          throw new Error("Could not establish connection. Receiving end does not exist.")
+        }
+        return { found: "text", text: "Deep ready", waitedMs: 25 }
       },
-    ],
+    },
   })
   const session = { browserSessionId: "tab-1", userId: "local", url: "https://example.test/" }
 
   try {
     await harness.dispatcher.executeToolRequest(123, session, {
-      id: "req-wait-deep-tree",
+      id: "req-wait-recovery",
       tool: "yunti_wait_for",
       arguments: { text: "Deep ready", timeoutMs: 1000 },
     })
 
-    const command = harness.cdpCommands.at(-1)
-    assert.equal(command.method, "Runtime.evaluate")
-    assert.match(command.params.expression, /node\.shadowRoot/)
-    assert.match(command.params.expression, /node\.contentDocument/)
-    assert.match(command.params.expression, /root\.textContent/)
-    assert.equal(harness.posted.at(-1).result.ok, true)
-    assert.equal(harness.posted.at(-1).result.condition, "text")
+    assert.deepEqual(harness.ensureRegistrationCalls, [123])
+    assert.equal(attempts, 2)
+    const result = harness.posted.at(-1).result
+    assert.equal(result.ok, true)
+    assert.equal(result.condition, "text")
+    assert.equal(harness.cdpCommands.length, 0)
   } finally {
     harness.restore()
   }
@@ -2323,6 +2335,61 @@ test("wait_for timeout returns structured recovery diagnostics", async () => {
     })
   } finally {
     Date.now = originalNow
+    harness.restore()
+  }
+})
+
+test("wait_for urlContains resolves from a tab update event without polling", async () => {
+  const harness = createDispatcherHarness({
+    tabsById: { 123: { id: 123, url: "https://example.test/start" } },
+  })
+  const session = { browserSessionId: "tab-1", userId: "local", url: "https://example.test/start" }
+
+  try {
+    const pending = harness.dispatcher.executeToolRequest(123, session, {
+      id: "req-wait-url",
+      tool: "yunti_wait_for",
+      arguments: { urlContains: "/done", timeoutMs: 2000 },
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(harness.posted.length, 0, "the wait must not resolve before the URL matches")
+
+    harness.emitTabUpdated(123, { status: "complete" }, { id: 123, url: "https://example.test/done" })
+    await pending
+
+    const result = harness.posted.at(-1).result
+    assert.equal(result.ok, true)
+    assert.equal(result.found, true)
+    assert.equal(result.condition, "urlContains")
+    assert.equal(result.value, "/done")
+    assert.equal(harness.cdpCommands.length, 0)
+  } finally {
+    harness.restore()
+  }
+})
+
+test("wait_for reports a page error when the runtime cannot be recovered", async () => {
+  const harness = createDispatcherHarness({
+    contentToolResponses: {
+      yunti_wait_for: () => {
+        throw new Error("Could not establish connection. Receiving end does not exist.")
+      },
+    },
+  })
+  const session = { browserSessionId: "tab-1", userId: "local", url: "https://example.test/" }
+
+  try {
+    await harness.dispatcher.executeToolRequest(123, session, {
+      id: "req-wait-error",
+      tool: "yunti_wait_for",
+      arguments: { text: "Loaded", timeoutMs: 1000 },
+    })
+
+    const posted = harness.posted.at(-1)
+    assert.equal(posted.ok, false)
+    assert.match(posted.error, /Receiving end does not exist/)
+    assert.deepEqual(harness.ensureRegistrationCalls, [123])
+  } finally {
     harness.restore()
   }
 })

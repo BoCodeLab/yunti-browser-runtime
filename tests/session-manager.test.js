@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { createSessionManager as createRuntimeSessionManager } from "../extension/session-manager.js"
+import { invalidateSettingsCache } from "../extension/settings.js"
 
 const testManagers = new Set()
 
@@ -24,6 +25,9 @@ function installChromeMock(options = {}) {
   const updatedTabs = []
   const previousChrome = globalThis.chrome
   const previousFetch = globalThis.fetch
+  // The settings snapshot is cached per service worker; drop it so each mocked
+  // test starts from its own storage instead of a previous test's snapshot.
+  invalidateSettingsCache()
   globalThis.fetch = async (url, init = {}) => {
     requests.push({
       url: String(url),
@@ -124,6 +128,7 @@ function installChromeMock(options = {}) {
       testManagers.clear()
       globalThis.chrome = previousChrome
       globalThis.fetch = previousFetch
+      invalidateSettingsCache()
     },
   }
 }
@@ -274,6 +279,114 @@ test("controller polling continues while a browser tool is still executing", asy
     )
     assert.equal(timeoutResult?.body.ok, false)
     assert.match(timeoutResult?.body.error || "", /timed out inside the extension/)
+  } finally {
+    mock.restore()
+  }
+})
+
+test("controller tool queue serializes per page instead of blocking other tabs", async () => {
+  const started = []
+  const finished = []
+  const mock = installChromeMock({
+    pollEvents: [
+      {
+        type: "tool_request",
+        id: "wait-a",
+        tool: "yunti_wait_for",
+        route: { tabId: 1 },
+        deadlineAt: Date.now() + 5000,
+      },
+      {
+        type: "tool_request",
+        id: "click-b",
+        tool: "yunti_click",
+        route: { tabId: 2 },
+        deadlineAt: Date.now() + 5000,
+      },
+      {
+        type: "tool_request",
+        id: "click-a",
+        tool: "yunti_click",
+        route: { tabId: 1 },
+        deadlineAt: Date.now() + 5000,
+      },
+    ],
+  })
+  try {
+    const manager = createSessionManager({ controllerToolTimeoutMs: 5000 })
+    manager.setToolRequestHandler(async (_tabId, _session, event) => {
+      started.push(event.id)
+      if (event.id === "wait-a") await new Promise((resolve) => setTimeout(resolve, 60))
+      finished.push(event.id)
+    })
+    await manager.registerBrowserController("per_page_queue")
+    await new Promise((resolve) => setTimeout(resolve, 160))
+
+    assert.ok(
+      finished.indexOf("click-b") < finished.indexOf("wait-a"),
+      `page B work must finish while page A waits, got finished=${finished.join(",")}`
+    )
+    assert.ok(
+      started.indexOf("click-a") > started.indexOf("wait-a"),
+      `same-page work must stay ordered, got started=${started.join(",")}`
+    )
+    assert.ok(
+      finished.indexOf("click-a") > finished.indexOf("wait-a"),
+      `same-page work must not overtake the wait, got finished=${finished.join(",")}`
+    )
+    assert.equal(finished.at(-1), "click-a")
+  } finally {
+    mock.restore()
+  }
+})
+
+test("controller tool queue keeps unresolved page work exclusive against tab work", async () => {
+  const started = []
+  const finished = []
+  const mock = installChromeMock({
+    pollEvents: [
+      {
+        type: "tool_request",
+        id: "wait-a",
+        tool: "yunti_wait_for",
+        route: { tabId: 1 },
+        deadlineAt: Date.now() + 5000,
+      },
+      {
+        type: "tool_request",
+        id: "observe-unresolved",
+        tool: "yunti_observe_page",
+        route: {},
+        deadlineAt: Date.now() + 5000,
+      },
+      {
+        type: "tool_request",
+        id: "click-b",
+        tool: "yunti_click",
+        route: { tabId: 2 },
+        deadlineAt: Date.now() + 5000,
+      },
+    ],
+  })
+  try {
+    const manager = createSessionManager({ controllerToolTimeoutMs: 5000 })
+    manager.setToolRequestHandler(async (_tabId, _session, event) => {
+      started.push(event.id)
+      if (event.id === "wait-a") await new Promise((resolve) => setTimeout(resolve, 60))
+      finished.push(event.id)
+    })
+    await manager.registerBrowserController("exclusive_lane")
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    assert.deepEqual(started, ["wait-a", "observe-unresolved", "click-b"], `started=${started.join(",")}`)
+    assert.ok(
+      finished.indexOf("wait-a") < finished.indexOf("observe-unresolved"),
+      `unresolved page work must wait for in-flight tab work, got finished=${finished.join(",")}`
+    )
+    assert.ok(
+      finished.indexOf("observe-unresolved") < finished.indexOf("click-b"),
+      `later tab work must wait for unresolved page work, got finished=${finished.join(",")}`
+    )
   } finally {
     mock.restore()
   }

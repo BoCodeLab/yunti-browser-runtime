@@ -2,6 +2,7 @@ import { createCdpController } from "./cdp.js"
 import { installNetworkMonitor } from "./network-monitor.js"
 import { createSessionManager } from "./session-manager.js"
 import { createToolDispatcher } from "./tool-handlers.js"
+import { installSettingsCacheInvalidation } from "./settings.js"
 
 const BRIDGE_RECOVERY_ALARM_NAME = "yunti_bridge_recovery"
 const FAST_RECOVERY_DELAYS_MS = [1000, 3000, 8000, 15000, 30000]
@@ -25,16 +26,22 @@ const { executeToolRequest } = createToolDispatcher({
   postBridge,
   ensureTabRegistered: sessionManager.ensureTabRegistered,
   cdp,
+  getPlatformMatches: sessionManager.getPlatformMatches,
+  getCaptureDiagnostics: sessionManager.getCaptureDiagnostics,
 })
 
 sessionManager.setToolRequestHandler(executeToolRequest)
 
-installNetworkMonitor({
+const networkMonitor = installNetworkMonitor({
   sessionsByTab,
   postBridge,
   getPlatformMatches: sessionManager.getPlatformMatches,
 })
+if (networkMonitor?.getCaptureDiagnostics) {
+  sessionManager.setCaptureDiagnosticsProvider(networkMonitor.getCaptureDiagnostics)
+}
 installCdpEventForwarder()
+installSettingsCacheInvalidation()
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   void detachCdpTab(tabId, null, "tab_removed").catch(() => {})

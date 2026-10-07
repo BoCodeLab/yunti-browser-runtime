@@ -3,6 +3,8 @@
   const DEFAULT_MAX_TEXT_LENGTH = 12000
   const MAX_ELEMENTS = 500
   const MAX_TEXT_LENGTH = 60000
+  const WAIT_DEBOUNCE_MS = 120
+  const WAIT_POLL_INTERVAL_MS = 250
   const INTERACTIVE_SELECTOR = [
     "a[href]",
     "button",
@@ -36,6 +38,7 @@
     /\b\d{1,6}\s+[\p{L}0-9 .'-]{2,}\s+(street|st|road|rd|avenue|ave|lane|ln|boulevard|blvd|drive|dr|way|court|ct)\b|[\p{Script=Han}]{1,20}(省|市|区|县|路|街|号楼|单元|室)/iu
   let lastObservationState = null
   let uidGeneration = 0
+  const activeWaits = new Set()
 
   function observePage(args = {}) {
     const mode = args.mode === "fullPage" ? "fullPage" : "viewport"
@@ -204,6 +207,140 @@
     }
   }
 
+  // In-page wait primitive. It replaces the previous background-side CDP polling
+  // loop: no debugger attach, no repeated Runtime.evaluate round trips, and DOM
+  // changes are detected by MutationObserver instead of by fixed-interval scans.
+  // Resolves with a match object, or null when the deadline passes.
+  function waitForCondition(args = {}) {
+    const text = String(args.text || "").trim()
+    const selector = String(args.selector || "").trim()
+    const urlContains = String(args.urlContains || "").trim()
+    const timeoutMs = clampInteger(args.timeoutMs, 100, 30000, 5000)
+    if (!text && !selector && !urlContains) {
+      return Promise.reject(new Error("waitForCondition requires text, selector, or urlContains"))
+    }
+    const startedAt = Date.now()
+    const immediate = matchWaitTarget({ text, selector, urlContains })
+    if (immediate) return Promise.resolve({ ...immediate, waitedMs: 0 })
+
+    return new Promise((resolve) => {
+      let settled = false
+      let debounceTimer = null
+      let intervalTimer = null
+      let deadlineTimer = null
+      const observer =
+        typeof globalScope.MutationObserver === "function"
+          ? new globalScope.MutationObserver(schedule)
+          : null
+
+      activeWaits.add(cancel)
+
+      function finish(match) {
+        if (settled) return
+        settled = true
+        activeWaits.delete(cancel)
+        observer?.disconnect?.()
+        if (intervalTimer !== null) clearInterval(intervalTimer)
+        if (deadlineTimer !== null) clearTimeout(deadlineTimer)
+        if (debounceTimer !== null) clearTimeout(debounceTimer)
+        resolve(match ? { ...match, waitedMs: Date.now() - startedAt } : null)
+      }
+
+      function schedule() {
+        if (settled || debounceTimer !== null) return
+        debounceTimer = setTimeout(() => {
+          debounceTimer = null
+          check()
+        }, WAIT_DEBOUNCE_MS)
+      }
+
+      function check() {
+        if (settled) return
+        const match = matchWaitTarget({ text, selector, urlContains })
+        if (match) finish(match)
+      }
+
+      // Called when the page runtime is torn down or re-injected so the
+      // subscription cannot outlive the listener that owns it.
+      function cancel() {
+        finish(null)
+      }
+
+      intervalTimer = setInterval(schedule, WAIT_POLL_INTERVAL_MS)
+      deadlineTimer = setTimeout(() => finish(null), timeoutMs)
+      if (observer && document.documentElement) {
+        try {
+          observer.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            characterData: true,
+          })
+        } catch {}
+      }
+      schedule()
+    })
+  }
+
+  function matchWaitTarget({ text, selector, urlContains }) {
+    // Client-side routing (history.pushState / replaceState) does not fire a tab
+    // update, so the page must also watch its own URL for SPA navigations.
+    if (urlContains && String(globalScope.location?.href || "").includes(urlContains)) {
+      return { found: true, condition: "urlContains", value: urlContains }
+    }
+    // Fast path: the top-level document covers the common case without walking
+    // shadow roots and iframe documents on every check.
+    if (selector) {
+      try {
+        if (hasNonZeroRect(document.querySelector(selector))) {
+          return { found: "selector", selector }
+        }
+      } catch {}
+    }
+    if (text) {
+      const body = document.body
+      const bodyText = body?.innerText || body?.textContent || ""
+      if (bodyText.includes(text)) return { found: "text", text }
+    } else if (!selector) {
+      return null
+    }
+
+    // Deep path: open shadow roots and same-origin iframe documents.
+    let matched = null
+    walkRoots((root) => {
+      if (matched) return
+      if (selector && typeof root.querySelector === "function") {
+        try {
+          if (hasNonZeroRect(root.querySelector(selector))) {
+            matched = { found: "selector", selector }
+            return
+          }
+        } catch {}
+      }
+      if (!text) return
+      const surface = root.body || root
+      const rootText = surface.innerText || surface.textContent || ""
+      if (rootText.includes(text)) matched = { found: "text", text }
+    }, { trackOffsets: false })
+    return matched
+  }
+
+  function hasNonZeroRect(element) {
+    if (!element || typeof element.getBoundingClientRect !== "function") return false
+    const rect = element.getBoundingClientRect()
+    return rect.width > 0 && rect.height > 0
+  }
+
+  // Cancel every in-flight subscription. Content-runtime teardown calls this so a
+  // re-injected page runtime never leaves the previous instance's waits running.
+  function cancelPendingWaits() {
+    if (!activeWaits.size) return 0
+    const cancelled = activeWaits.size
+    for (const cancel of [...activeWaits]) cancel()
+    activeWaits.clear()
+    return cancelled
+  }
+
   function collectInteractiveCandidates() {
     return collectFromRoots((root) => queryAll(root, INTERACTIVE_SELECTOR))
   }
@@ -213,9 +350,27 @@
   }
 
   function collectFromRoots(selectElements) {
-    const visitedRoots = new Set()
     const visitedElements = new Set()
     const results = []
+    walkRoots((root, offsetX, offsetY) => {
+      for (const element of selectElements(root)) {
+        if (!element || visitedElements.has(element)) continue
+        visitedElements.add(element)
+        if (isInsideYuntiWidget(element)) continue
+        setObservationOffset(element, offsetX, offsetY)
+        results.push(element)
+      }
+    })
+    return results
+  }
+
+  // Single root-walking primitive shared by observation and in-page waits: the
+  // top document, then open shadow roots and same-origin iframe documents.
+  // Observation needs iframe offsets for rect math; waits do not, and skipping
+  // them avoids a forced layout read on every wait check.
+  function walkRoots(visitRoot, options = {}) {
+    const trackOffsets = options.trackOffsets !== false
+    const visitedRoots = new Set()
     const roots = [{ root: document, offsetX: 0, offsetY: 0 }]
 
     while (roots.length) {
@@ -226,13 +381,7 @@
       if (!root || visitedRoots.has(root)) continue
       visitedRoots.add(root)
 
-      for (const element of selectElements(root)) {
-        if (!element || visitedElements.has(element)) continue
-        visitedElements.add(element)
-        if (isInsideYuntiWidget(element)) continue
-        setObservationOffset(element, offsetX, offsetY)
-        results.push(element)
-      }
+      visitRoot(root, offsetX, offsetY)
 
       for (const element of queryAll(root, "body *")) {
         const shadowRoot = element?.shadowRoot
@@ -241,17 +390,21 @@
         }
         const iframeDocument = getSameOriginIframeDocument(element)
         if (iframeDocument) {
-          const iframeRect = rectInfo(element, { offsetX, offsetY })
-          roots.push({
-            root: iframeDocument,
-            offsetX: iframeRect.x,
-            offsetY: iframeRect.y,
-          })
+          if (trackOffsets) {
+            const iframeRect = rectInfo(element, { offsetX, offsetY })
+            roots.push({
+              root: iframeDocument,
+              offsetX: iframeRect.x,
+              offsetY: iframeRect.y,
+            })
+          } else {
+            roots.push({ root: iframeDocument, offsetX: 0, offsetY: 0 })
+          }
         }
       }
     }
 
-    return results
+    return visitedRoots
   }
 
   function queryAll(root, selector) {
@@ -941,10 +1094,13 @@
   globalScope.YuntiBrowserRuntimeObserver = {
     observePage,
     findElements,
+    waitForCondition,
+    cancelPendingWaits,
     _private: {
       matchesElement,
       shouldRedact,
       redactUrl,
+      matchWaitTarget,
     },
   }
 })(globalThis)

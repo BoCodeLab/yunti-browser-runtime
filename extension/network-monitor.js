@@ -3,13 +3,44 @@ import { DEFAULT_PLATFORM_MATCHES, isPlatformUrl } from "./settings.js"
 const NETWORK_FILTER = { urls: ["http://*/*", "https://*/*"] }
 const SENSITIVE_FIELD_RE =
   /cookie|authorization|token|secret|password|passwd|pwd|sid|session|ticket|tgc|captcha|验证码|密码/i
+const BRIDGE_POST_ATTEMPTS = 3
+const BRIDGE_POST_RETRY_DELAY_MS = 250
+
+// The bridge long-poll has a small window between cycles where no request is in
+// flight. A single failed POST used to drop the observation silently; retry a
+// couple of times and count permanent losses so they surface in diagnostics.
+function createBridgeReporter(postBridge) {
+  const telemetry = { posted: 0, retried: 0, dropped: 0, lastError: "" }
+  async function send(path, body) {
+    for (let attempt = 1; attempt <= BRIDGE_POST_ATTEMPTS; attempt++) {
+      try {
+        await postBridge(path, body)
+        telemetry.posted += 1
+        if (attempt > 1) telemetry.retried += 1
+        return true
+      } catch (error) {
+        telemetry.lastError = error?.message || String(error)
+        if (attempt < BRIDGE_POST_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, BRIDGE_POST_RETRY_DELAY_MS))
+        }
+      }
+    }
+    telemetry.dropped += 1
+    return false
+  }
+  return { send, telemetry }
+}
 
 export function installNetworkMonitor({ sessionsByTab, postBridge, getPlatformMatches }) {
   const networkRequests = new Map()
+  const reporter = createBridgeReporter(postBridge)
+  let filteredByUrl = 0
 
   chrome.webRequest.onBeforeRequest.addListener(
     (details) => {
-      beginNetworkEvent({ details, sessionsByTab, networkRequests, getPlatformMatches })
+      if (!beginNetworkEvent({ details, sessionsByTab, networkRequests, getPlatformMatches })) {
+        filteredByUrl += 1
+      }
     },
     NETWORK_FILTER,
     ["requestBody"]
@@ -22,7 +53,7 @@ export function installNetworkMonitor({ sessionsByTab, postBridge, getPlatformMa
       sessionsByTab,
       networkRequests,
       getPlatformMatches,
-      postBridge,
+      reporter,
     })
   }, NETWORK_FILTER)
 
@@ -33,18 +64,25 @@ export function installNetworkMonitor({ sessionsByTab, postBridge, getPlatformMa
       sessionsByTab,
       networkRequests,
       getPlatformMatches,
-      postBridge,
+      reporter,
     })
   }, NETWORK_FILTER)
 
-  return { networkRequests }
+  return {
+    networkRequests,
+    getCaptureDiagnostics: () => ({
+      ...reporter.telemetry,
+      filteredByPlatformMatch: filteredByUrl,
+      platformMatches: getPlatformMatches?.() || null,
+    }),
+  }
 }
 
 function beginNetworkEvent({ details, sessionsByTab, networkRequests, getPlatformMatches }) {
-  if (details.tabId < 0) return
+  if (details.tabId < 0) return false
   const session = sessionsByTab.get(details.tabId)
-  if (!session) return
-  if (!isSupportedNetworkUrl(details.url, getPlatformMatches)) return
+  if (!session) return false
+  if (!isSupportedNetworkUrl(details.url, getPlatformMatches)) return false
   networkRequests.set(details.requestId, {
     browserSessionId: session.browserSessionId,
     tabId: details.tabId,
@@ -58,6 +96,7 @@ function beginNetworkEvent({ details, sessionsByTab, networkRequests, getPlatfor
     startTime: details.timeStamp || Date.now(),
     requestBody: summarizeRequestBody(details.requestBody),
   })
+  return true
 }
 
 function finishNetworkEvent({
@@ -66,7 +105,7 @@ function finishNetworkEvent({
   sessionsByTab,
   networkRequests,
   getPlatformMatches,
-  postBridge,
+  reporter,
 }) {
   if (!isSupportedNetworkUrl(details.url, getPlatformMatches)) return
   const event = networkRequests.get(details.requestId) || {
@@ -88,7 +127,7 @@ function finishNetworkEvent({
   }
   if (!event.browserSessionId) return
   const completedAt = new Date(details.timeStamp || Date.now()).toISOString()
-  void postBridge("/extension/network-event", {
+  void reporter.send("/extension/network-event", {
     ...event,
     completedAt,
     durationMs: Math.max(
@@ -101,7 +140,7 @@ function finishNetworkEvent({
       : false,
     fromCache: Boolean(details.fromCache),
     error: outcome.error || "",
-  }).catch(() => {})
+  })
 }
 
 function isSupportedNetworkUrl(url, getPlatformMatches) {

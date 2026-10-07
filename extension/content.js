@@ -1,3 +1,16 @@
+// The manifest content script and the chrome.scripting recovery injection share
+// one isolated world, so this file must stay safe to (re)install at any time.
+;(function installYuntiContentRuntime(globalScope) {
+  const RUNTIME_MARKER = "__YUNTI_BROWSER_RUNTIME_CONTENT__"
+  const RUNTIME_REVISION = 1
+
+  const previousRuntime = globalScope[RUNTIME_MARKER]
+  if (previousRuntime && typeof previousRuntime.teardown === "function") {
+    try {
+      previousRuntime.teardown()
+    } catch {}
+  }
+
 const PATCH_ATTR = "data-yunti-browser-runtime-patch"
 const DANGEROUS_RE = /提交|保存|删除|作废|关闭|下架|审核|确认|同意|拒绝|submit|save|delete|remove|approve|reject/i
 const AUTH_CACHE_TTL_MS = 5000
@@ -10,8 +23,9 @@ let registerTimer = null
 let authStateCache = null
 let extensionContextInvalidated = false
 let pageWatchersInstalled = false
+let pageWatcherTeardown = null
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+function handleRuntimeMessage(message, _sender, sendResponse) {
   if (message?.type === "yunti_execute_tool") {
     void executeTool(message.tool, message.arguments || {})
       .then(sendResponse)
@@ -25,7 +39,31 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true
   }
   return false
-})
+}
+
+function teardown() {
+  try {
+    chrome.runtime.onMessage.removeListener(handleRuntimeMessage)
+  } catch {}
+  try {
+    window.YuntiBrowserRuntimeObserver?.cancelPendingWaits?.()
+  } catch {}
+  clearTimeout(registerTimer)
+  registerTimer = null
+  if (pageWatcherTeardown) {
+    try {
+      pageWatcherTeardown()
+    } catch {}
+    pageWatcherTeardown = null
+  }
+}
+
+chrome.runtime.onMessage.addListener(handleRuntimeMessage)
+globalScope[RUNTIME_MARKER] = {
+  revision: RUNTIME_REVISION,
+  teardown,
+  _private: { clickAt, clickElement, fillElement, scrollPage },
+}
 
 void bootstrapContent()
 
@@ -212,19 +250,28 @@ function textFromXPath(xpath) {
 function installPageWatchers() {
   if (pageWatchersInstalled) return
   pageWatchersInstalled = true
+  const watcherTeardowns = []
   window.addEventListener("popstate", scheduleRegister)
+  watcherTeardowns.push(() => window.removeEventListener("popstate", scheduleRegister))
   window.addEventListener("hashchange", scheduleRegister)
-  document.addEventListener("visibilitychange", () => {
+  watcherTeardowns.push(() => window.removeEventListener("hashchange", scheduleRegister))
+  const handleVisibilityChange = () => {
     if (!document.hidden) scheduleRegister()
-  })
+  }
+  document.addEventListener("visibilitychange", handleVisibilityChange)
+  watcherTeardowns.push(() => document.removeEventListener("visibilitychange", handleVisibilityChange))
 
   for (const name of ["pushState", "replaceState"]) {
     const original = history[name]
-    history[name] = function patchedHistoryState(...args) {
+    const patched = function patchedHistoryState(...args) {
       const result = original.apply(this, args)
       scheduleRegister()
       return result
     }
+    history[name] = patched
+    watcherTeardowns.push(() => {
+      if (history[name] === patched) history[name] = original
+    })
   }
 
   const observer = new MutationObserver(scheduleRegister)
@@ -232,6 +279,15 @@ function installPageWatchers() {
     childList: true,
     subtree: true,
   })
+  watcherTeardowns.push(() => observer.disconnect())
+
+  pageWatcherTeardown = () => {
+    for (const watcherTeardown of watcherTeardowns.splice(0)) {
+      try {
+        watcherTeardown()
+      } catch {}
+    }
+  }
 }
 
 function scheduleRegister() {
@@ -300,6 +356,8 @@ async function executeTool(tool, args) {
       return selectElement(args)
     case "yunti_scroll":
       return scrollPage(args)
+    case "yunti_wait_for":
+      return waitForPageCondition(args)
     case "yunti_request_user_confirmation":
       return requestUserConfirmation(args)
     default:
@@ -321,6 +379,16 @@ function findElements(args = {}) {
   }
   window.__YUNTI_BROWSER_SESSION_ID__ = browserSessionId
   return window.YuntiBrowserRuntimeObserver.findElements(args)
+}
+
+// In-page wait subscription. The DOM observer owns the MutationObserver and the
+// shadow/iframe traversal, so the background never has to poll the page over CDP.
+function waitForPageCondition(args = {}) {
+  if (!window.YuntiBrowserRuntimeObserver?.waitForCondition) {
+    throw new Error("yunti_wait_for is unavailable because the DOM observer module was not loaded. Refresh the page and try again.")
+  }
+  window.__YUNTI_BROWSER_SESSION_ID__ = browserSessionId
+  return window.YuntiBrowserRuntimeObserver.waitForCondition(args)
 }
 
 async function getPageSnapshot(args = {}) {
@@ -1308,3 +1376,5 @@ function clamp(value, min, max) {
   if (!Number.isFinite(value)) return min
   return Math.max(min, Math.min(max, value))
 }
+
+})(globalThis)

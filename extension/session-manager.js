@@ -2,6 +2,7 @@ import {
   DEFAULT_BRIDGE_URL,
   bridgeHeaders,
   getSettings,
+  invalidateSettingsCache,
   isPlatformUrl,
   normalizeBaseUrl,
   normalizeBridgeToken,
@@ -13,6 +14,12 @@ const DEFAULT_CONTENT_SCRIPT_PROBE_TIMEOUT_MS = 1500
 const DEFAULT_CONTENT_SCRIPT_INJECTION_TIMEOUT_MS = 3000
 const DEFAULT_CONTROLLER_TOOL_TIMEOUT_MS = 25_000
 const DEFAULT_CONTROLLER_POLL_STALL_TIMEOUT_MS = 45_000
+// Re-register the controller on every Nth poll instead of every poll. Each
+// registration costs a chrome.tabs.query + a bridge round trip + a hub session
+// sweep, and the bridge TTL (90s) is far larger than the poll cycle, so a
+// 5-cycle cadence keeps the heartbeat comfortably fresh while removing one
+// network round trip from the critical path of most tool calls.
+const DEFAULT_CONTROLLER_REGISTER_INTERVAL = 5
 export const EXTENSION_PROTOCOL_VERSION = 1
 
 export function createSessionManager(options = {}) {
@@ -32,21 +39,55 @@ export function createSessionManager(options = {}) {
     options.controllerPollStallTimeoutMs,
     DEFAULT_CONTROLLER_POLL_STALL_TIMEOUT_MS
   )
+  const controllerRegisterInterval = Math.max(
+    1,
+    Number(options.controllerRegisterInterval) || DEFAULT_CONTROLLER_REGISTER_INTERVAL
+  )
+  // Per-operation watchdog: the longest a single browser tool may hold its lane
+  // before the queue is allowed to move on. Kept below controllerToolTimeoutMs
+  // so the agent gets a bounded, structured answer instead of a bare timeout.
+  const controllerToolWatchdogMs = normalizeTimeout(
+    options.controllerToolWatchdogMs,
+    12_000
+  )
+  // If a request has already waited this long behind an unfinished operation,
+  // answer immediately with YUNTI_TAB_BUSY instead of queueing another timeout.
+  const controllerToolQueueWaitTimeoutMs = normalizeTimeout(
+    options.controllerToolQueueWaitTimeoutMs,
+    Math.max(2_000, Math.min(8_000, Math.round(controllerToolTimeoutMs / 3)))
+  )
   const sessionsByTab = new Map()
   const pendingTabRecovery = new Map()
   const lastInjectionAtByTab = new Map()
   let controllerPoller = null
   let controllerPollerRoute = ""
   let controllerPollerLastProgressAt = 0
-  let controllerToolQueue = Promise.resolve()
+  const tabToolQueues = new Map()
+  let exclusiveToolLane = Promise.resolve()
+  let browserToolLane = Promise.resolve()
   let controllerSession = null
   let browserControllerIdPromise = null
   let cachedPlatformMatches = null
   let toolRequestHandler = null
+  let captureDiagnosticsProvider = null
   let stopped = false
 
   function getPlatformMatches() {
     return cachedPlatformMatches
+  }
+
+  function setCaptureDiagnosticsProvider(provider) {
+    captureDiagnosticsProvider = typeof provider === "function" ? provider : null
+  }
+
+  function getCaptureDiagnostics() {
+    if (!captureDiagnosticsProvider) return null
+    try {
+      const value = captureDiagnosticsProvider()
+      return value && typeof value === "object" ? value : null
+    } catch {
+      return null
+    }
   }
 
   function setToolRequestHandler(handler) {
@@ -187,6 +228,9 @@ export function createSessionManager(options = {}) {
 
   async function registerBrowserController(reason = "heartbeat") {
     if (stopped) return { ok: false, reason: "stopped" }
+    // A controller (re)registration is a settings-change boundary: the bridge
+    // URL or token may have just been edited, so never serve a cached snapshot.
+    invalidateSettingsCache()
     const settings = await getSettings()
     cachedPlatformMatches = settings.platformMatches
     const browserSessionId = await getBrowserControllerId()
@@ -272,6 +316,7 @@ export function createSessionManager(options = {}) {
     controllerPollerRoute = routeKey
     controllerPollerLastProgressAt = Date.now()
     const loop = async () => {
+      let cyclesSinceRegister = controllerRegisterInterval
       while (!controller.signal.aborted) {
         try {
           const liveTabIds = await currentLiveTabIds()
@@ -283,7 +328,11 @@ export function createSessionManager(options = {}) {
               controllerSession.browserInstanceId || session.browserInstanceId
             ).catch(() => controllerSession.tabHandles || {})
           }
-          await postBridge("/sessions/register", controllerSession || session).catch(() => null)
+          if (cyclesSinceRegister >= controllerRegisterInterval) {
+            cyclesSinceRegister = 0
+            await postBridge("/sessions/register", controllerSession || session).catch(() => null)
+          }
+          cyclesSinceRegister += 1
           const settings = await getSettings()
           if (controller.signal.aborted) break
           cachedPlatformMatches = settings.platformMatches
@@ -320,34 +369,104 @@ export function createSessionManager(options = {}) {
     void loop()
   }
 
+  // Read-only browser inventory tools that never touch a page execution context.
+  // They may run alongside page work.
+  const PARALLEL_BROWSER_TOOLS = new Set([
+    "yunti_list_browser_targets",
+    "yunti_list_pages",
+    "yunti_get_browser_target",
+    "yunti_new_page",
+  ])
+
+  // Three-lane execution model. Before this change one global promise chain
+  // serialized every browser tool in the whole controller, so a single
+  // yunti_wait_for on one tab could delay click/fill/observe on every other tab.
+  //
+  // - tab:<id>: requests with a resolved live tab. Same tab stays ordered,
+  //   different tabs run in parallel.
+  // - exclusive: page tools without a resolved tab (the extension then falls
+  //   back to the active tab) and raw CDP without a resolved tab. These may
+  //   touch any page, so they wait for all in-flight tab work and block later
+  //   tab work until they finish.
+  // - browser: inventory-only tools. No page barrier in either direction.
+  function controllerToolQueueKey(event = {}) {
+    const route = event.route || {}
+    const tabId = Number(route.tabId)
+    if (Number.isFinite(tabId) && tabId > 0) return `tab:${tabId}`
+    if (PARALLEL_BROWSER_TOOLS.has(event.tool)) return "browser"
+    return "exclusive"
+  }
+
   function queueControllerToolRequest(session, event) {
-    controllerToolQueue = controllerToolQueue
-      .catch(() => {})
-      .then(async () => {
-        if (stopped) return
-        try {
-          if (Number.isFinite(Number(event.deadlineAt)) && Number(event.deadlineAt) <= Date.now()) {
-            throw new Error(`Browser tool request timed out before execution: ${event.tool || "unknown"}`)
-          }
-          const deadlineAt = Number(event.deadlineAt)
-          const remainingMs = Number.isFinite(deadlineAt)
-            ? deadlineAt - Date.now()
-            : controllerToolTimeoutMs
-          await withTimeout(
-            toolRequestHandler(null, session, event),
-            Math.min(controllerToolTimeoutMs, remainingMs),
-            `Browser tool execution timed out inside the extension: ${event.tool || "unknown"}`
-          )
-        } catch (error) {
-          await postBridge("/extension/result", {
-            browserSessionId: session.browserSessionId,
-            requestId: event.id,
-            ok: false,
-            error: error?.message || String(error),
-          }).catch(() => {})
+    const queueKey = controllerToolQueueKey(event)
+    const tabTail = tabToolQueues.get(queueKey)
+    const queuedAt = Date.now()
+    let startAfter
+    if (queueKey === "exclusive") {
+      startAfter = Promise.all([
+        exclusiveToolLane.catch(() => {}),
+        Promise.allSettled([...tabToolQueues.values()]),
+      ]).then(() => {})
+    } else if (queueKey === "browser") {
+      startAfter = browserToolLane.catch(() => {})
+    } else {
+      startAfter = Promise.all([
+        (tabTail || Promise.resolve()).catch(() => {}),
+        exclusiveToolLane.catch(() => {}),
+      ]).then(() => {})
+    }
+    const next = startAfter.then(async () => {
+      if (stopped) return
+      try {
+        if (Number.isFinite(Number(event.deadlineAt)) && Number(event.deadlineAt) <= Date.now()) {
+          throw new Error(`Browser tool request timed out before execution: ${event.tool || "unknown"}`)
         }
-      })
-    void controllerToolQueue
+        // Fast fail instead of stacking another full timeout when the lane is
+        // still draining a stuck operation. One wedged page operation used to
+        // make every queued request on that tab burn its whole budget and
+        // report an unactionable timeout.
+        const waitedMs = Date.now() - queuedAt
+        if (waitedMs >= controllerToolQueueWaitTimeoutMs) {
+          throw new Error(
+            `YUNTI_TAB_BUSY ${event.tool || "unknown"} waited ${waitedMs}ms behind an unfinished operation on the same tab. ` +
+              `retryable=true retryBudget=1 recoveryAction=verify_page_state_then_retry`
+          )
+        }
+        const deadlineAt = Number(event.deadlineAt)
+        const remainingMs = Number.isFinite(deadlineAt)
+          ? deadlineAt - Date.now()
+          : controllerToolTimeoutMs
+        const budgetMs = Math.min(controllerToolTimeoutMs, remainingMs)
+        // The one-shot watchdog bounds how long this request holds the lane,
+        // even when the underlying page operation never settles. Resolution is
+        // signalled here so the queue can drain; the abandoned operation is
+        // discarded when its (late) result arrives.
+        await withTimeout(
+          toolRequestHandler(null, session, event),
+          Math.min(budgetMs, controllerToolWatchdogMs),
+          `Browser tool execution timed out inside the extension: ${event.tool || "unknown"}`
+        )
+      } catch (error) {
+        await postBridge("/extension/result", {
+          browserSessionId: session.browserSessionId,
+          requestId: event.id,
+          ok: false,
+          error: error?.message || String(error),
+        }).catch(() => {})
+      }
+    })
+    if (queueKey === "exclusive") {
+      exclusiveToolLane = next.catch(() => {})
+    } else if (queueKey === "browser") {
+      browserToolLane = next.catch(() => {})
+    } else {
+      tabToolQueues.set(queueKey, next)
+      void next
+        .catch(() => {})
+        .finally(() => {
+          if (tabToolQueues.get(queueKey) === next) tabToolQueues.delete(queueKey)
+        })
+    }
   }
 
   // Stops the single controller transport. Used when the controller route is
@@ -687,13 +806,37 @@ export function createSessionManager(options = {}) {
   async function postBridge(path, body) {
     const settings = await getSettings()
     cachedPlatformMatches = settings.platformMatches
-    const response = await fetch(`${settings.bridgeUrl}${path}`, {
+    const url = `${settings.bridgeUrl}${path}`
+    const options = {
       method: "POST",
       headers: bridgeHeaders(settings),
       body: JSON.stringify(body),
-    })
-    if (!response.ok) throw new Error(`bridge HTTP ${response.status}`)
-    return response.json()
+    }
+    try {
+      const response = await fetch(url, options)
+      if (!response.ok) throw new Error(`bridge HTTP ${response.status}`)
+      return response.json()
+    } catch (error) {
+      // A connection-level failure means the request never reached the bridge,
+      // so replaying it cannot duplicate a side effect. HTTP error responses are
+      // not retried: the bridge may already have accepted the payload.
+      if (!/fetch failed|network|ECONNREFUSED|socket|aborted/i.test(error?.message || "")) {
+        throw error
+      }
+      let lastError = error
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await delay(250 * (attempt + 1))
+        try {
+          const retry = await fetch(url, options)
+          if (!retry.ok) throw new Error(`bridge HTTP ${retry.status}`)
+          return retry.json()
+        } catch (retryError) {
+          lastError = retryError
+          if (!/fetch failed|network|ECONNREFUSED|socket|aborted/i.test(retryError?.message || "")) break
+        }
+      }
+      throw lastError
+    }
   }
 
   async function getPanelState() {
@@ -748,6 +891,9 @@ export function createSessionManager(options = {}) {
     controllerPoller = null
     controllerPollerRoute = ""
     controllerSession = null
+    tabToolQueues.clear()
+    exclusiveToolLane = Promise.resolve()
+    browserToolLane = Promise.resolve()
   }
 
   return {
@@ -758,11 +904,13 @@ export function createSessionManager(options = {}) {
     ensureTabRegistered,
     forgetTab,
     forwardConsoleEvent,
+    getCaptureDiagnostics,
     getPlatformMatches,
     handleMessage,
     pageHandleFor,
     postBridge,
     registerBrowserController,
+    setCaptureDiagnosticsProvider,
     setToolRequestHandler,
     stop,
     stopControllerPolling,

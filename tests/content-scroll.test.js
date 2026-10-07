@@ -79,6 +79,23 @@ function createContentHarness({ elementFromPoint, documentScrollTop = 0 } = {}) 
     scrollHeight: 2000,
     clientHeight: 600,
   })
+  const createEventTarget = () => {
+    const listeners = new Map()
+    return {
+      listeners,
+      addEventListener(type, listener) {
+        if (!listeners.has(type)) listeners.set(type, new Set())
+        listeners.get(type).add(listener)
+      },
+      removeEventListener(type, listener) {
+        listeners.get(type)?.delete(listener)
+      },
+    }
+  }
+  const documentEvents = createEventTarget()
+  const windowEvents = createEventTarget()
+  const observers = []
+  const messageListeners = []
   const document = {
     title: "Scroll Test",
     body,
@@ -88,13 +105,39 @@ function createContentHarness({ elementFromPoint, documentScrollTop = 0 } = {}) 
     querySelector: () => null,
     querySelectorAll: () => [],
     elementFromPoint: elementFromPoint || (() => null),
+    addEventListener: documentEvents.addEventListener,
+    removeEventListener: documentEvents.removeEventListener,
+    createTreeWalker: () => ({ currentNode: null, nextNode: () => false }),
   }
   const context = {
     document,
     location: new URL("https://example.test/scroll"),
     navigator: { userAgent: "Chrome/123", platform: "macOS", language: "en-US" },
-    window: { innerWidth: 800, innerHeight: 600, confirm: () => true },
+    window: {
+      innerWidth: 800,
+      innerHeight: 600,
+      confirm: () => true,
+      addEventListener: windowEvents.addEventListener,
+      removeEventListener: windowEvents.removeEventListener,
+    },
+    history: { pushState() {}, replaceState() {} },
+    MutationObserver: class FakeMutationObserver {
+      constructor(callback) {
+        this.callback = callback
+        this.connected = false
+        observers.push(this)
+      }
+
+      observe() {
+        this.connected = true
+      }
+
+      disconnect() {
+        this.connected = false
+      }
+    },
     Node: { ELEMENT_NODE: 1 },
+    NodeFilter: { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 },
     Event: class FakeEvent {
       constructor(type, options = {}) {
         this.type = type
@@ -118,7 +161,15 @@ function createContentHarness({ elementFromPoint, documentScrollTop = 0 } = {}) 
     getComputedStyle: (element) => element.style || {},
     chrome: {
       runtime: {
-        onMessage: { addListener: () => {} },
+        onMessage: {
+          addListener: (listener) => {
+            messageListeners.push(listener)
+          },
+          removeListener: (listener) => {
+            const index = messageListeners.indexOf(listener)
+            if (index >= 0) messageListeners.splice(index, 1)
+          },
+        },
         sendMessage: async (message) => {
           if (message?.type === "yunti_is_supported_page") return { supported: true }
           if (message?.type === "yunti_content_ready") {
@@ -135,6 +186,14 @@ function createContentHarness({ elementFromPoint, documentScrollTop = 0 } = {}) 
   vm.createContext(context)
   const source = readFileSync(resolve("extension/content.js"), "utf8")
   vm.runInContext(source, context, { filename: "extension/content.js" })
+  const runtime = context.__YUNTI_BROWSER_RUNTIME_CONTENT__
+  Object.assign(context, runtime?._private || {})
+  context.__yuntiTest = {
+    messageListeners,
+    windowListeners: windowEvents.listeners,
+    documentListeners: documentEvents.listeners,
+    connectedObserverCount: () => observers.filter((observer) => observer.connected).length,
+  }
   return context
 }
 
@@ -165,6 +224,69 @@ test("content script does not inject a visible Yunti page widget", () => {
   assert.doesNotMatch(source, /yunti-browser-runtime-widget/)
   assert.doesNotMatch(source, /installWidget|updateWidgetStatus|data-toggle|data-refresh/)
   assert.doesNotMatch(source, /当前页面临时增强|刷新连接/)
+})
+
+function loadContentRuntime(context) {
+  const source = readFileSync(resolve("extension/content.js"), "utf8")
+  vm.runInContext(source, context, { filename: "extension/content.js" })
+  return context
+}
+
+async function dispatchContentMessage(context, message) {
+  const responses = []
+  await Promise.all(
+    [...context.__yuntiTest.messageListeners].map((listener) =>
+      new Promise((resolve) => {
+        let settled = false
+        const finish = () => {
+          if (settled) return
+          settled = true
+          resolve()
+        }
+        const handled = listener(message, {}, (response) => {
+          responses.push(response)
+          finish()
+        })
+        if (handled !== true) finish()
+        setTimeout(finish, 200)
+      })
+    )
+  )
+  return responses
+}
+
+test("content runtime replaces its previous instance when reinjected", async () => {
+  const context = createContentHarness()
+
+  const initialResponses = await dispatchContentMessage(context, { type: "yunti_refresh_registration" })
+  assert.equal(initialResponses.length, 1)
+  assert.equal(initialResponses[0]?.ok, true, JSON.stringify(initialResponses[0]))
+  assert.equal(typeof context.__YUNTI_BROWSER_RUNTIME_CONTENT__?.teardown, "function")
+  assert.equal(context.__yuntiTest.windowListeners.get("popstate")?.size, 1)
+  const firstListener = context.__yuntiTest.messageListeners[0]
+
+  assert.doesNotThrow(() => loadContentRuntime(context))
+
+  assert.equal(context.__yuntiTest.messageListeners.length, 1)
+  assert.notEqual(context.__yuntiTest.messageListeners[0], firstListener)
+  assert.equal(context.__YUNTI_BROWSER_RUNTIME_CONTENT__.revision, 1)
+  assert.equal(context.__yuntiTest.windowListeners.get("popstate")?.size ?? 0, 0)
+
+  const reinstalledResponses = await dispatchContentMessage(context, { type: "yunti_refresh_registration" })
+  assert.equal(reinstalledResponses.length, 1)
+  assert.equal(reinstalledResponses[0]?.ok, true, JSON.stringify(reinstalledResponses[0]))
+  assert.equal(context.__yuntiTest.windowListeners.get("popstate")?.size, 1)
+  assert.equal(context.__yuntiTest.windowListeners.get("hashchange")?.size, 1)
+  assert.equal(context.__yuntiTest.documentListeners.get("visibilitychange")?.size, 1)
+  assert.equal(context.__yuntiTest.connectedObserverCount(), 1)
+
+  const toolResponses = await dispatchContentMessage(context, {
+    type: "yunti_execute_tool",
+    tool: "yunti_observe_page",
+    arguments: {},
+  })
+  assert.equal(toolResponses.length, 1)
+  assert.equal(typeof toolResponses[0], "object")
 })
 
 test("content scroll reports coordinate container hit metadata", () => {

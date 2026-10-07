@@ -241,6 +241,30 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
       expression: "window.__clicked",
     })
     assert.equal(afterAxClick.value, 2)
+
+    const reinjection = await worker.evaluate(async (tabId) => {
+      try {
+        await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] })
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: String(error?.message || error) }
+      }
+    }, pageTarget.tabId)
+    assert.equal(reinjection.ok, true, `content script reinjection failed: ${reinjection.error || "unknown error"}`)
+
+    const afterReinjection = await callTool(bridge, "yunti_observe_page", {
+      browserSessionId,
+      redaction: "balanced",
+    })
+    assert.match(afterReinjection.textTree, /Click me/)
+    const reinjectedTarget = afterReinjection.elements.find((element) => element.uid && element.name === "Click me")
+    assert.ok(reinjectedTarget?.uid)
+    await callTool(bridge, "yunti_click", { browserSessionId, uid: reinjectedTarget.uid })
+    const afterReinjectionClick = await callTool(bridge, "yunti_evaluate_script", {
+      browserSessionId,
+      expression: "window.__clicked",
+    })
+    assert.equal(afterReinjectionClick.value, 3)
     await rm(artifactDir, { recursive: true, force: true })
   } catch (error) {
     if (page) {

@@ -39,6 +39,13 @@ const _ROUTE_USER_ID = process.env.YUNTI_BROWSER_USER_ID || "local"
 const _ROUTE_USER_NAME = process.env.YUNTI_BROWSER_USER_NAME || "local"
 const PACKAGE_VERSION = packageJson.version || ""
 const proxyCompatibilityCache = new Map()
+// Concurrency ceiling for in-flight JSON-RPC requests. An MCP client may issue
+// several calls before earlier ones finish; answering them one at a time made a
+// single slow browser call block every faster call behind it.
+const MAX_INFLIGHT_REQUESTS = Math.max(
+  1,
+  Number(process.env.YUNTI_BROWSER_MCP_CONCURRENCY || 4)
+)
 
 function normalizeBaseUrl(value) {
   return String(value || "")
@@ -120,7 +127,29 @@ function classifyToolFailure(error, tool = "") {
       detail: "List targets through the intended routeBrowserSessionId, then pass that page browserSessionId or browserInstanceId.",
     }
   }
-  if (/stale or disconnected|heartbeat expired/i.test(message)) {
+  if (/YUNTI_TAB_BUSY|YUNTI_CDP_TIMEOUT/.test(message)) {
+    return {
+      message,
+      code: /YUNTI_TAB_BUSY/.test(message) ? "YUNTI_TAB_BUSY" : "YUNTI_CDP_TIMEOUT",
+      retryable: true,
+      retryBudget: 1,
+      recoveryAction: "verify_page_state_then_retry",
+      resultUncertain: false,
+      detail: "A previous operation on this tab has not finished. Verify the current page state, then retry once instead of stacking more work on the same tab.",
+    }
+  }
+  if (/YUNTI_PARAMETER_INVALID|is required|must be (a )?number/.test(message)) {
+    return {
+      message,
+      code: "YUNTI_PARAMETER_INVALID",
+      retryable: false,
+      retryBudget: 0,
+      recoveryAction: "fix_arguments_and_retry",
+      resultUncertain: false,
+      detail: "The tool arguments were rejected before the browser was touched. Correct the arguments from yunti_get_tool_usage_hints and retry.",
+    }
+  }
+  if (/stale or disconnected|heartbeat expired|no longer exists|showing error page/i.test(message)) {
     return {
       message,
       code: "YUNTI_SESSION_STALE",
@@ -408,6 +437,25 @@ export async function runStdio() {
       )
     }
   }
+  console.error(`[yunti-browser-runtime] stdio concurrency ${MAX_INFLIGHT_REQUESTS}`)
+
+  const write = (value) => process.stdout.write(`${JSON.stringify(value)}\n`)
+  const inflight = new Set()
+
+  const dispatch = (req) => {
+    const task = handleJsonRpc(req, bridge)
+      .then((response) => {
+        if (response) write(response)
+      })
+      .catch((error) => {
+        write(jsonRpcErr(req?.id ?? null, -32603, `internal error: ${error?.message || error}`))
+      })
+      .finally(() => {
+        inflight.delete(task)
+      })
+    inflight.add(task)
+    return task
+  }
 
   const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
   for await (const rawLine of rl) {
@@ -417,14 +465,18 @@ export async function runStdio() {
     try {
       req = JSON.parse(line)
     } catch (error) {
-      process.stdout.write(
-        `${JSON.stringify(jsonRpcErr(null, -32700, `parse error: ${error.message}`))}\n`
-      )
+      write(jsonRpcErr(null, -32700, `parse error: ${error.message}`))
       continue
     }
-    const response = await handleJsonRpc(req, bridge)
-    if (response) process.stdout.write(`${JSON.stringify(response)}\n`)
+    // Keep reading while requests are in flight so a slow browser call cannot
+    // stall faster calls (responses are correlated by JSON-RPC id).
+    while (inflight.size >= MAX_INFLIGHT_REQUESTS) {
+      await Promise.race([...inflight])
+    }
+    dispatch(req)
   }
+  // Drain outstanding work so in-flight responses are not lost on EOF.
+  await Promise.allSettled([...inflight])
 }
 
 export async function runBridgeOnly() {
