@@ -39,6 +39,14 @@ Yunti Browser Runtime 是一个面向 MCP Agent 的本地浏览器运行时。�
 | 数据边界 | Bridge 默认只监听 `127.0.0.1`，无远程服务、无平台账号、默认无 token |
 | Agent 行为 | 结构化错误、共享重试预算、写操作不确定性与恢复建议 |
 
+### 0.2.8 源码安装与并发/延迟优化
+
+`0.2.8` 是第一个以 GitHub 源码安装为主路径的版本：运行时没有任何第三方依赖，克隆后
+`npm install` 可选；`npm run bridge` 在 Windows `cmd.exe` 下不再报错。同一版本并入
+上游的稳定页面句柄与结构化失败契约，并完成一轮并发/延迟优化——原生模态对话框不再
+卡死标签页、controller 注册降频、卡住的执行通道由看门狗释放并返回结构化
+`YUNTI_TAB_BUSY`。详细说明见 [0.2.8 发布说明](docs/RELEASE_0_2_8.md)。
+
 ### 0.2.7 页面无侵入热修复
 
 `0.2.7` 移除了扩展注入业务页面的 `AI` 悬浮按钮和“刷新连接”面板。后台
@@ -63,10 +71,18 @@ benchmark 通过 `38/38` 场景、`114` 次尝试和 `397` 次 MCP 调用；Edge
 Node.js 22 或更高版本：
 
 ```bash
+# 稳定版（推荐）：最新的发布 tag
+git clone --branch v0.2.8 https://github.com/BoCodeLab/yunti-browser-runtime.git
+
+# 开发版：跟随 main，包含尚未发布的改动
 git clone https://github.com/BoCodeLab/yunti-browser-runtime.git
+
 cd yunti-browser-runtime
 npm install
 ```
+
+没有安装 git 时，可以从 [Releases](https://github.com/BoCodeLab/yunti-browser-runtime/releases)
+页下载 `Source code (zip)` 解压，内容与克隆完全一致。
 
 请把仓库放在一个固定位置（例如 `D:\tools\yunti-browser-runtime`）。下一步生成的
 MCP 配置会写入该目录的绝对路径，目录被移动或删除后需要重新生成配置。
@@ -124,11 +140,13 @@ Agent 应能看到 Chrome / Edge 的可访问标签页，并可直接使用 `tab
 ### 5. 更新
 
 ```bash
-git pull
+git fetch --tags
+git checkout v0.2.8
 ```
 
-更新后需要在 `chrome://extensions` 或 `edge://extensions` 中点击本扩展的“重新加载”，
-浏览器才会使用新的扩展代码。MCP server 会在 Agent 下次建立会话时使用新代码。
+跟随 `main` 开发版时改用 `git pull`。更新后需要在 `chrome://extensions` 或
+`edge://extensions` 中点击本扩展的“重新加载”，浏览器才会使用新的扩展代码。
+MCP server 会在 Agent 下次建立会话时使用新代码。
 
 如果更新后 `npm run doctor` 报协议或版本不匹配，先重新加载扩展，再重试。
 
@@ -342,7 +360,7 @@ npm run test:soak -- --duration-seconds=180 --allow-short
 | [P8 稳定页面句柄计划](docs/STABLE_PAGE_HANDLE_PLAN.md) | 标签页长期身份、session 内部恢复与验收契约 |
 | [15 分钟耐久测试](docs/SOAK_TEST.md) | 复杂 fixture、覆盖契约、产物与通过标准 |
 | [安全说明](docs/SECURITY.md) | 权限、隐私、数据脱敏和本地边界 |
-| [0.2.6 发布说明](docs/RELEASE_0_2_6.md) | 当前版本目标、实现与验收 |
+| [0.2.8 发布说明](docs/RELEASE_0_2_8.md) | 当前版本目标、实现与验收 |
 | [项目状态](docs/PROJECT_STATUS.md) | 阶段总览、实测证据和后续工作 |
 | [路线图](docs/ROADMAP.md) | 后续版本与能力规划 |
 | [发布手册](docs/RELEASE.md) | npm 发布、扩展打包与发布后验证 |
