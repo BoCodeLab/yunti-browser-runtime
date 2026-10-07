@@ -6,7 +6,7 @@
 
 本地优先 · MCP 原生 · Content Script + CDP 双通道 · 无远程账号依赖
 
-[![install](https://img.shields.io/badge/install-from%20GitHub%20source-2ea44f)](docs/INSTALL_FROM_GIT.md)
+[![install](https://img.shields.io/badge/install-from%20GitHub%20source-2ea44f)](docs/INSTALL.md)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=node.js&logoColor=white)](package.json)
 [![MCP](https://img.shields.io/badge/MCP-52_tools-111111)](docs/TOOL_GUIDE.md)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
@@ -84,8 +84,8 @@ npm install -g yunti-browser-runtime
 
 两种方式都默认不需要 npm token，也不需要 Yunti 账号。后续步骤对两种方式都适用，
 区别只在命令写法：源码安装使用 `npm run <命令>`，npm 全局安装直接写
-`yunti-browser-runtime <命令>`。源码安装的完整说明见
-[从源码安装](docs/INSTALL_FROM_GIT.md)。
+`yunti-browser-runtime <命令>`。各 Agent 的详细接入配置与故障恢复见
+[安装指南](docs/INSTALL.md)。
 
 ### 2. 接入你的 Agent
 
@@ -143,6 +143,25 @@ yunti_list_browser_targets
 
 Agent 应能看到 Chrome / Edge 的可访问标签页，并可直接使用 `tabId`、`targetId` 或
 `browserSessionId` 开始操作。
+
+### 5. 更新
+
+源码安装：
+
+```bash
+git pull
+```
+
+npm 全局安装：
+
+```bash
+npm install -g yunti-browser-runtime@latest
+```
+
+两种方式更新后，都需要在 `chrome://extensions` 或 `edge://extensions` 中点击本扩展的
+“重新加载”，浏览器才会使用新的扩展代码。MCP server 会在 Agent 下次建立会话时使用新代码。
+
+如果更新后 `npm run doctor` 报协议或版本不匹配，先重新加载扩展，再重试。
 
 ## 交给 Agent 安装
 
@@ -395,6 +414,23 @@ DOM 页面适合 fresh uid 与语义动作；跨域 frame、Canvas、浏览器 t
 
 先读取结构化恢复字段，丢弃旧 ID，然后最多列出一次 targets，并通过目标页的 `tabId`
 或 `targetId` 进行一次有预算的恢复。页面超时不代表 controller 或整个浏览器离线。
+
+</details>
+
+<details>
+<summary><strong>移动克隆目录后 Agent 报找不到 server</strong></summary>
+
+`print-config` 生成的 MCP 配置保存的是仓库目录的绝对路径。移动或重命名目录后，重新
+执行 `npm run print-config -- --agent <你的Agent> --human`，用新输出替换 Agent 的 MCP
+配置即可。
+
+</details>
+
+<details>
+<summary><strong>Windows 上 npm run bridge 报环境变量错误</strong></summary>
+
+早期版本的 npm script 使用 POSIX 前置环境变量语法，在 cmd.exe 下无法解析。当前版本
+已改为跨平台的 `node scripts/bridge.js`。若仍报错，先 `git pull` 到最新版本。
 
 </details>
 
