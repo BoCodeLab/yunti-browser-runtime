@@ -47,6 +47,39 @@ const MAX_INFLIGHT_REQUESTS = Math.max(
   Number(process.env.YUNTI_BROWSER_MCP_CONCURRENCY || 4)
 )
 
+// Not every answer describes the page as it is right now. A process-local
+// definition, a local memory file, or an extension-side capture buffer can all
+// look like live page state to an agent that has no way to tell the difference,
+// and reasoning confidently about stale data is worse than a visible error.
+// Non-live answers therefore carry an explicit marker; live reads stay unmarked
+// to keep the payload small. docs/TOOL_GUIDE.md documents the convention.
+const TOOL_DATA_FRESHNESS = new Map([
+  // Describes the tool surface itself, not any browser state.
+  ["yunti_get_tool_usage_hints", "static"],
+  // Local files under ~/.yunti_agent; unrelated to what the browser shows now.
+  ["yunti_get_learning_memory", "local"],
+  // Extension-side buffers: entries can be filtered by platformMatches, evicted
+  // by the retention window, or truncated before they reach the caller.
+  ["yunti_list_console_messages", "buffered"],
+  ["yunti_get_console_message", "buffered"],
+  ["yunti_list_network_requests", "buffered"],
+  ["yunti_get_network_request", "buffered"],
+  ["yunti_get_network_log", "buffered"],
+  ["yunti_get_cdp_events", "buffered"],
+])
+
+export function dataFreshnessFor(tool) {
+  return TOOL_DATA_FRESHNESS.get(tool) || "live"
+}
+
+export function annotateDataFreshness(tool, result) {
+  const freshness = TOOL_DATA_FRESHNESS.get(tool)
+  if (!freshness) return result
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result
+  if (result.dataFreshness) return result
+  return { ...result, dataFreshness: freshness }
+}
+
 function normalizeBaseUrl(value) {
   return String(value || "")
     .trim()
@@ -400,7 +433,7 @@ export async function handleJsonRpc(req, bridge) {
     }
     try {
       const result = await callTool(bridge, name, args)
-      return jsonRpcOk(req.id, toolOk(result))
+      return jsonRpcOk(req.id, toolOk(annotateDataFreshness(name, result)))
     } catch (error) {
       const failure = classifyToolFailure(error, name)
       return jsonRpcOk(

@@ -105,6 +105,16 @@ npm run print-config -- --agent codex --human
 配置加入 Agent 后，新建或重载 Agent 会话。Agent 启动 MCP server 时会自动启动
 本地 Bridge，通常不需要另开一个 `bridge` 进程。
 
+skill 也可以一条命令直接装好，不必手动复制目录：
+
+```bash
+npm run install-skill -- --harness codex
+```
+
+支持的 `--harness`：`codex`、`claude-code`、`cursor`、`cline`、`dsh`。用
+`--dest <目录>` 可以装到任意位置，`--dry-run` 只报告将要做什么、不写磁盘，
+目标已存在时会拒绝覆盖，需要 `--force`。
+
 ### 3. 加载浏览器扩展
 
 获取扩展目录：就是仓库内的 `extension` 目录（例如
@@ -179,6 +189,7 @@ git checkout v0.2.8
 9. 告诉我默认 Bridge URL 是 http://127.0.0.1:48887，本地默认不需要 token，不需要打开 popup、保存设置或刷新页面。
 10. 执行：npm run doctor
 11. doctor 正常后调用 yunti_list_browser_targets；选择目标页面并调用 yunti_get_page_snapshot 或 yunti_observe_page 验证控制能力。
+12. 在真实操作我的页面之前，先用一段话明确告诉我这个 runtime 会读取哪些数据（页面内容、控制台消息、网络请求、截图、本机学习记忆），以及这些数据只经过本机 127.0.0.1 的 Bridge、不会上传到任何远程服务，然后等我确认再继续。
 
 不要遗漏 packaged skill 的安装或接入。不要默认要求我刷新页面、切换标签、重启浏览器或填写 token。页面路由异常时先使用 controller、tabId/targetId 和结构化 recoveryAction 自动恢复；只有浏览器明确阻止注入且自动恢复失败时，才请求我处理。最后提醒我两件事：克隆目录不要移动或删除，因为 MCP 配置里写的是该目录的绝对路径；以后更新用 git pull，更新后要在浏览器扩展页点一次“重新加载”。
 ```
@@ -304,6 +315,26 @@ npm run test:soak
 - 提交、删除、购买、发布、生产数据修改或敏感文件上传等操作应由 Agent 先获得确认。
 - CDP 调试横幅只是 Chrome 的运行状态提示；权限判断基于动作影响，而不是使用的后端。
 
+### 接入 Agent 后它会读到什么
+
+把 runtime 交给 Agent 之前，你应该知道它能读到什么、数据去了哪里。
+
+| 读取项 | 内容 | 去向 |
+| --- | --- | --- |
+| 页面内容 | DOM 结构、可见文本、元素属性；输入框的值默认以 `valueRedacted` 返回 | 仅本机 Bridge |
+| 控制台消息 | 页面 console 输出，按脱敏规则过滤后才返回 | 仅本机 Bridge |
+| 网络请求 | URL、方法、状态码、耗时与脱敏后的请求体预览；不返回 cookie 与 Authorization | 仅本机 Bridge |
+| 截图 | 可见像素，可能包含敏感内容 | 仅本机 Bridge |
+| 学习记忆 | `~/.yunti_agent/` 下的本地 JSON 文件 | 仅本机文件系统 |
+
+**不会发生的事**：不上传数据到远程服务、不需要平台账号、不写远程日志。Bridge 默认只监听
+`127.0.0.1`；需要更严格的边界时设置 `YUNTI_BROWSER_BRIDGE_TOKEN`，并在扩展 popup 里
+填入同一个 token。
+
+Agent 也会读到**非实时**的数据（工具说明、本地记忆、扩展采集缓冲）。这类返回会带上
+`dataFreshness` 标注，避免 Agent 把缓冲当成页面当前状态 —— 详见
+[工具指南的数据新鲜度一节](docs/TOOL_GUIDE.md)。
+
 [查看权限、数据边界与威胁模型](docs/SECURITY.md)
 
 ## 可靠性演进
@@ -343,6 +374,17 @@ YUNTI_E2E=1 npm run test:e2e
 遇到时可以改用支持长连接的下载方式手动安装，步骤见
 [耐久测试文档的安装章节](docs/SOAK_TEST.md)。真实浏览器测试会弹出一个独立的
 Chromium 窗口，它使用临时 profile，不会影响你正在使用的浏览器。
+
+浏览器交互语义测试（在真实浏览器里断言 click / fill / select / scroll / dialog 的实际页面效果）：
+
+```bash
+YUNTI_E2E=1 npm run test:interactions
+```
+
+`npm test` 默认跳过它 —— 它需要一个 Chromium 和可见窗口，只在显式设置 `YUNTI_E2E=1`
+时运行。与 `test:e2e`（验证整条链路通不通）不同，这个文件验证的是**动作语义对不对**：
+点击是否真的触发了页面处理函数、填入的值是否留在控件里、滚到底部是否给出结构化诊断、
+原生弹窗是否会让标签页卡死。
 
 完整 15 分钟耐久测试：
 

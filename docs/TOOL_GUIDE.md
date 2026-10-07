@@ -243,6 +243,25 @@ taking an action whose effect cannot be verified from page state.
 - Compatibility fields must remain available while structured result fields are
   introduced.
 
+## Data Freshness
+
+Not every answer describes the page as it is right now. A result that comes from
+a process-local definition, a local memory file, or an extension-side capture
+buffer looks exactly like a live page read unless it says otherwise, so non-live
+answers carry an explicit marker:
+
+| `dataFreshness` | Meaning | Tools |
+| --- | --- | --- |
+| `static` | Process-local definition of the tool surface; describes no browser state. | `yunti_get_tool_usage_hints` |
+| `local` | Read from local files under `~/.yunti_agent`; unrelated to the current page. | `yunti_get_learning_memory` |
+| `buffered` | Read from an extension-side capture buffer. Entries can be filtered by `platformMatches`, evicted by the retention window, or truncated. | `yunti_list_console_messages`, `yunti_get_console_message`, `yunti_list_network_requests`, `yunti_get_network_request`, `yunti_get_network_log`, `yunti_get_cdp_events` |
+| *(absent)* | The answer was read from the live page during this call. | every other tool |
+
+**Why it matters**: without the marker an agent can read a filtered capture
+buffer, conclude "the page produced no events", and start debugging a page that
+is working correctly. When a `buffered` result comes back empty, read the filter
+state returned alongside it before concluding anything about the page.
+
 ## Wait Guidance
 
 - Use `yunti_wait_for` when async rendering, navigation, validation, dynamic
