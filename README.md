@@ -454,6 +454,7 @@ kill $(lsof -ti tcp:48887)
 修改时，请同时补充工具契约、测试、Agent 指引，并确保 15 分钟 soak coverage 不会
 遗漏新增公开工具。
 
+- [贡献指南](CONTRIBUTING.md)：提交信息规范与提交前检查
 - [报告问题](https://github.com/BoCodeLab/yunti-browser-runtime/issues)
 - [项目初衷](docs/PROJECT_INTENT.md)
 - [执行计划](docs/EXECUTION_PLAN.md)
