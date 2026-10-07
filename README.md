@@ -59,11 +59,8 @@ benchmark 通过 `38/38` 场景、`114` 次尝试和 `397` 次 MCP 调用；Edge
 
 ### 1. 安装 Runtime
 
-有两种安装方式，功能完全一致。
-
-**方式 A：从 GitHub 源码安装（推荐）**
-
-克隆仓库到固定目录后直接使用，不需要 npm 账号，浏览器扩展目录就在仓库内：
+克隆仓库到固定目录后直接使用，不需要 npm 账号，浏览器扩展目录就在仓库内。要求
+Node.js 22 或更高版本：
 
 ```bash
 git clone https://github.com/BoCodeLab/yunti-browser-runtime.git
@@ -74,29 +71,19 @@ npm install
 请把仓库放在一个固定位置（例如 `D:\tools\yunti-browser-runtime`）。下一步生成的
 MCP 配置会写入该目录的绝对路径，目录被移动或删除后需要重新生成配置。
 
-**方式 B：npm 全局安装**
+`npm install` 这一步是可选的：运行时（MCP server、本地 Bridge、CLI、浏览器扩展）
+没有任何第三方依赖，跳过也能正常使用；装上的 `playwright-core` 只服务于真实浏览器
+E2E 与耐久测试。
 
-要求 Node.js 22 或更高版本：
-
-```bash
-npm install -g yunti-browser-runtime
-```
-
-两种方式都默认不需要 npm token，也不需要 Yunti 账号。后续步骤对两种方式都适用，
-区别只在命令写法：源码安装使用 `npm run <命令>`，npm 全局安装直接写
-`yunti-browser-runtime <命令>`。各 Agent 的详细接入配置与故障恢复见
-[安装指南](docs/INSTALL.md)。
+源码安装不会注册全局命令，本节及后续所有命令统一使用 `npm run <命令>` 形式。
+各 Agent 的详细接入配置与故障恢复见[安装指南](docs/INSTALL.md)。
 
 ### 2. 接入你的 Agent
 
 让 CLI 针对 Agent 生成 MCP 配置和 skill 安装指引：
 
 ```bash
-# 源码安装
 npm run print-config -- --agent codex --human
-
-# npm 全局安装
-yunti-browser-runtime print-config -- --agent codex --human
 ```
 
 支持的 `--agent` 示例：`codex`、`claude-code`、`cursor`、`cline`。把输出的 MCP
@@ -105,14 +92,8 @@ yunti-browser-runtime print-config -- --agent codex --human
 
 ### 3. 加载浏览器扩展
 
-获取扩展目录。源码安装时就是仓库内的 `extension` 目录（例如
-`D:\tools\yunti-browser-runtime\extension`）；npm 全局安装时用：
-
-```bash
-echo "$(npm root -g)/yunti-browser-runtime/extension"
-```
-
-PowerShell 下对应写法为 `Join-Path (npm root -g) "yunti-browser-runtime/extension"`。
+获取扩展目录：就是仓库内的 `extension` 目录（例如
+`D:\tools\yunti-browser-runtime\extension`）。
 
 然后完成一次浏览器侧加载：
 
@@ -128,11 +109,7 @@ Chrome / Edge 不允许静默安装未上架扩展，因此这一步需要用户
 ### 4. 验证连接
 
 ```bash
-# 源码安装
 npm run doctor
-
-# npm 全局安装
-yunti-browser-runtime doctor
 ```
 
 看到 runtime、Bridge、extension/controller 版本一致后，让 Agent 调用：
@@ -146,28 +123,18 @@ Agent 应能看到 Chrome / Edge 的可访问标签页，并可直接使用 `tab
 
 ### 5. 更新
 
-源码安装：
-
 ```bash
 git pull
 ```
 
-npm 全局安装：
-
-```bash
-npm install -g yunti-browser-runtime@latest
-```
-
-两种方式更新后，都需要在 `chrome://extensions` 或 `edge://extensions` 中点击本扩展的
-“重新加载”，浏览器才会使用新的扩展代码。MCP server 会在 Agent 下次建立会话时使用新代码。
+更新后需要在 `chrome://extensions` 或 `edge://extensions` 中点击本扩展的“重新加载”，
+浏览器才会使用新的扩展代码。MCP server 会在 Agent 下次建立会话时使用新代码。
 
 如果更新后 `npm run doctor` 报协议或版本不匹配，先重新加载扩展，再重试。
 
 ## 交给 Agent 安装
 
-不想自己逐步配置时，把下面整段复制给 Agent。提示词默认走 GitHub 源码安装；
-如果你更想用 npm 全局安装，把第 2、3 步换成 `npm install -g yunti-browser-runtime`，
-并把后续的 `npm run <命令>` 换成 `yunti-browser-runtime <命令>`。
+不想自己逐步配置时，把下面整段复制给 Agent：
 
 <details>
 <summary><strong>展开安装引导提示词</strong></summary>
@@ -285,28 +252,26 @@ observe / wait / screenshot / network / console → 验证结果
 
 ## CLI
 
-源码安装时把下面的命令写成 `npm run <命令>`（例如 `npm run doctor`、
-`npm run print-config -- --agent codex --human`）；npm 全局安装时直接使用
-`yunti-browser-runtime <命令>`：
+命令入口是 `bin/yunti-browser-runtime.js`，源码安装统一通过 npm scripts 调用：
 
 ```bash
-yunti-browser-runtime --help
-yunti-browser-runtime doctor
-yunti-browser-runtime print-config -- --agent codex --human
-yunti-browser-runtime bridge
-yunti-browser-runtime console
-yunti-browser-runtime package-extension
-yunti-browser-runtime soak-test
+node bin/yunti-browser-runtime.js --help
+npm run doctor
+npm run print-config -- --agent codex --human
+npm run bridge
+npm run console
+npm run package:extension
+npm run test:soak
 ```
 
 | 命令 | 用途 |
 | --- | --- |
-| `doctor` | 检查 Node、Bridge、扩展、协议和浏览器 controller |
-| `print-config` | 输出目标 Agent 的 MCP 配置与 skill 安装指引 |
-| `bridge` | 独立启动本地 Bridge，通常只用于调试 |
-| `console` | 启动 Bridge 并显示可选的脱敏本地运行状态页 |
-| `package-extension` | 生成版本化扩展 zip |
-| `soak-test` | 运行至少 15 分钟的全工具浏览器耐久测试 |
+| `npm run doctor` | 检查 Node、Bridge、扩展、协议和浏览器 controller |
+| `npm run print-config` | 输出目标 Agent 的 MCP 配置与 skill 安装指引 |
+| `npm run bridge` | 独立启动本地 Bridge，通常只用于调试 |
+| `npm run console` | 启动 Bridge 并显示可选的脱敏本地运行状态页 |
+| `npm run package:extension` | 生成版本化扩展 zip |
+| `npm run test:soak` | 运行至少 15 分钟的全工具浏览器耐久测试 |
 
 ## 安全与隐私
 

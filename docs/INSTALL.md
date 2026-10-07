@@ -44,12 +44,6 @@ YUNTI_BROWSER_BRIDGE_TOKEN="$(openssl rand -hex 24)" npm run bridge
 YUNTI_BROWSER_BRIDGE_ALLOW_ORIGINS="http://127.0.0.1,http://localhost,chrome-extension://*" npm run bridge
 ```
 
-When installed as an npm package, the equivalent CLI command is:
-
-```bash
-yunti-browser-runtime bridge
-```
-
 When Yunti Browser Runtime is registered as an MCP server, the agent starts the
 stdio MCP process and that process starts the local bridge automatically. The
 standalone `bridge` command is useful for debugging, doctor checks, or manual
@@ -162,12 +156,6 @@ blocked.
 
 ```bash
 npm run doctor
-```
-
-Or through the package CLI:
-
-```bash
-yunti-browser-runtime doctor
 ```
 
 Expected JSON output includes `ok: true` when the local setup is healthy.
