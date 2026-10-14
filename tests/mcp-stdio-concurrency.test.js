@@ -139,7 +139,7 @@ test("stdio keeps answering after a parse error and still correlates ids", async
     const listed = await server.waitFor(42, 10_000)
     assert.equal(listed.timedOut, undefined)
     const tools = listed.result?.tools || []
-    assert.equal(tools.length, 53)
+    assert.equal(tools.length, 54)
     // Responses must carry the request id, including the one that raced the
     // parse error, so an MCP client can still correlate out-of-order replies.
     assert.equal(listed.id, 42)

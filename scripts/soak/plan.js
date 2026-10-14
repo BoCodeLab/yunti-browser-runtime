@@ -40,6 +40,7 @@ export const SOAK_TOOL_PHASES = {
   diagnostics: [
     "yunti_fetch_with_cookie",
     "yunti_read_result_chunk",
+    "yunti_list_downloads",
     "yunti_get_network_log",
     "yunti_clear_network_log",
     "yunti_clear_network_requests",

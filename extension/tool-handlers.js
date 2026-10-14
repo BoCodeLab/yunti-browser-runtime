@@ -147,6 +147,8 @@ export function createToolDispatcher({
         result = await sendCdpCommand(tabId, session, event.arguments || {})
       } else if (event.tool === "yunti_list_browser_targets" || event.tool === "yunti_list_pages") {
         result = await listBrowserTargets(session)
+      } else if (event.tool === "yunti_list_downloads") {
+        result = await listDownloads(session, event.arguments || {})
       } else if (event.tool === "yunti_get_browser_target") {
         result = await getBrowserTarget(session, event.arguments || {})
       } else if (event.tool === "yunti_cdp_detach") {
@@ -667,6 +669,98 @@ export function createToolDispatcher({
         code: "NAVIGATION_STAGE_TIMEOUT",
         nextStepHint: `The page did not reach ${stage} within ${timeoutMs} ms. Observe the current page before assuming the navigation succeeded; a committed document is not a loaded one.`,
       }),
+    }
+  }
+
+  // Downloads are browser-profile state, not page state, so this reads
+  // chrome.downloads directly rather than routing through a tab. The file stays
+  // in the browser's own download directory: this reports where it landed, it
+  // does not redirect the download or take it over.
+  const DOWNLOAD_STATES = new Set(["in_progress", "interrupted", "complete"])
+
+  // A download URL can carry a signed query string. The caller needs to know
+  // which file this was, not the credentials that fetched it.
+  function stripDownloadUrlSecrets(value) {
+    try {
+      const parsed = new URL(String(value || ""))
+      parsed.search = ""
+      parsed.hash = ""
+      return parsed.toString()
+    } catch {
+      return String(value || "").split(/[?#]/)[0]
+    }
+  }
+
+  function describeDownload(item) {
+    return {
+      id: item.id,
+      // The absolute local path the browser wrote. This is the only way a
+      // caller learns where the file went, since Yunti does not redirect it.
+      filename: item.filename || "",
+      url: stripDownloadUrlSecrets(item.url),
+      finalUrl: stripDownloadUrlSecrets(item.finalUrl),
+      state: item.state || "",
+      paused: Boolean(item.paused),
+      bytesReceived: Number(item.bytesReceived) || 0,
+      totalBytes: Number(item.totalBytes) || 0,
+      mime: item.mime || "",
+      startTime: item.startTime || "",
+      endTime: item.endTime || "",
+      exists: Boolean(item.exists),
+      error: item.error || "",
+      danger: item.danger || "",
+    }
+  }
+
+  async function listDownloads(session, args = {}) {
+    if (!chrome.downloads?.search) {
+      const error = new Error(
+        "YUNTI_DOWNLOADS_UNAVAILABLE: this extension was loaded without the \"downloads\" permission, so downloads cannot be listed. Reload the extension from the current package."
+      )
+      error.structuredFailure = {
+        code: "YUNTI_DOWNLOADS_UNAVAILABLE",
+        retryable: false,
+        retryBudget: 0,
+        recoveryAction: "reload_extension_from_current_package",
+        resultUncertain: false,
+      }
+      throw error
+    }
+
+    const rawLimit = Number(args.limit)
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(Math.floor(rawLimit), 100)) : 20
+    const query = {}
+    if (args.state !== undefined && args.state !== null && String(args.state) !== "") {
+      const state = String(args.state)
+      if (!DOWNLOAD_STATES.has(state)) {
+        throw new Error(`YUNTI_PARAMETER_INVALID: downloads state must be one of ${[...DOWNLOAD_STATES].join(", ")}`)
+      }
+      query.state = state
+    }
+    if (args.downloadId !== undefined && args.downloadId !== null && String(args.downloadId) !== "") {
+      query.id = Number(args.downloadId)
+    }
+
+    const matched = await chrome.downloads.search(query)
+    const newestFirst = matched
+      .slice()
+      .sort((a, b) => String(a.startTime || "").localeCompare(String(b.startTime || "")) || (a.id - b.id))
+    const downloads = newestFirst.slice(-limit).reverse().map(describeDownload)
+    const inProgress = downloads.filter((item) => item.state === "in_progress").length
+
+    return {
+      downloads,
+      returned: downloads.length,
+      matched: matched.length,
+      limit,
+      inProgress,
+      browserSessionId: session.browserSessionId,
+      directory: "browser default download directory (Yunti does not redirect downloads)",
+      // No checksum: computing one would mean reading the downloaded file, which
+      // an extension cannot do from chrome.downloads.
+      nextStepHint: downloads.length
+        ? "filename is the absolute path the browser wrote. Compare state and bytesReceived/totalBytes to decide whether a download finished; exists reports whether the file is still on disk."
+        : "No download matched. A download Yunti never observed cannot be listed; check the query or trigger the download first.",
     }
   }
 

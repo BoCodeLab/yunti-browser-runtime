@@ -92,7 +92,18 @@ async function getExtensionWorker(context) {
 }
 
 async function startFixtureServer() {
-  const server = http.createServer((_req, res) => {
+  const server = http.createServer((req, res) => {
+    // A downloadable payload for the download-reporting subtest. Served as a
+    // route rather than added to FIXTURE_HTML so the element lists the other
+    // subtests depend on stay unchanged.
+    if (String(req.url || "").startsWith("/payload.bin")) {
+      res.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-disposition": 'attachment; filename="yunti-fixture-payload.bin"',
+      })
+      res.end(Buffer.alloc(64 * 1024, 7))
+      return
+    }
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" })
     res.end(FIXTURE_HTML)
   })
@@ -242,6 +253,42 @@ test("browser interaction semantics", { skip: runE2e ? false : "set YUNTI_E2E=1 
       assert.equal(result.found, true)
       assert.equal(result.actionStatus, "condition_met")
       assert.ok(Date.now() - startedAt >= 12000)
+    })
+
+    await t.test("a completed download is reported with the path the browser wrote", async () => {
+      // The point of the downloads permission: Chrome refuses to expose the
+      // Browser download domain to a tab debuggee, so this is the only route to
+      // a real answer. The file lands in the isolated profile's own download
+      // directory, which the fixture removes with the profile.
+      await callTool("yunti_evaluate_script", {
+        browserSessionId: session,
+        expression: "(() => { const a = document.createElement('a'); a.href = '/payload.bin'; a.download = 'yunti-fixture-payload.bin'; document.body.appendChild(a); a.click(); a.remove(); return 'clicked' })()",
+      })
+
+      const deadline = Date.now() + 20_000
+      let reported = null
+      let lastListing = null
+      while (Date.now() < deadline) {
+        lastListing = await callTool("yunti_list_downloads", { browserSessionId: session, limit: 10 }, true)
+        // Match on the URL, not the filename: Playwright intercepts downloads and
+        // saves them under its own artifacts directory with a GUID name, so the
+        // suggested filename never reaches the path the browser reports.
+        reported = (lastListing.downloads || []).find((item) => String(item.url || "").includes("/payload.bin"))
+        if (reported?.state === "complete") break
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      }
+
+      assert.ok(
+        reported,
+        `the fixture download was never reported by yunti_list_downloads; last listing: ${JSON.stringify(lastListing)}`
+      )
+      assert.equal(reported.state, "complete")
+      assert.ok(reported.filename.length > 0, "the absolute local path must be reported")
+      assert.match(reported.filename, /[\\/]/, "the reported path must be absolute, not just a name")
+      assert.equal(reported.bytesReceived, 64 * 1024)
+      assert.equal(reported.totalBytes, 64 * 1024)
+      assert.equal(reported.exists, true)
+      assert.equal(reported.danger, "safe")
     })
 
     await t.test("a navigation stage wait settles on the new document, not the old one", async () => {

@@ -2,6 +2,62 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { createToolDispatcher } from "../extension/tool-handlers.js"
 
+test("downloads are reported newest first with their local path and no url secrets", async () => {
+  const harness = createDispatcherHarness({
+    downloads: [
+      { id: 1, filename: "C:\\dl\\older.pdf", url: "https://example.test/older.pdf?token=deadbeef", finalUrl: "https://example.test/older.pdf?token=deadbeef", state: "complete", bytesReceived: 900, totalBytes: 900, mime: "application/pdf", startTime: "2026-10-14T10:00:00Z", exists: true },
+      { id: 2, filename: "C:\\dl\\newer.zip", url: "https://example.test/newer.zip", state: "in_progress", bytesReceived: 10, totalBytes: 100, startTime: "2026-10-14T11:00:00Z", exists: true },
+    ],
+  })
+  try {
+    await harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, {
+      id: "dl", tool: "yunti_list_downloads", arguments: {},
+    })
+    const result = harness.posted.at(-1).result
+    assert.equal(result.returned, 2)
+    assert.equal(result.inProgress, 1)
+    assert.equal(result.downloads[0].id, 2, "newest first")
+    assert.equal(result.downloads[0].filename, "C:\\dl\\newer.zip")
+    assert.equal(result.downloads[0].state, "in_progress")
+    assert.equal(result.downloads[0].bytesReceived, 10)
+    assert.equal(result.downloads[0].totalBytes, 100)
+
+    const older = result.downloads[1]
+    assert.equal(older.filename, "C:\\dl\\older.pdf")
+    assert.equal(older.state, "complete")
+    // A download URL can carry a signed query string; the caller needs the file
+    // identity, not the credentials that fetched it.
+    assert.equal(older.url, "https://example.test/older.pdf")
+    assert.equal(JSON.stringify(result).includes("deadbeef"), false)
+  } finally {
+    harness.restore()
+  }
+})
+
+test("downloads can be filtered by state, and an unknown state is rejected", async () => {
+  const harness = createDispatcherHarness({
+    downloads: [
+      { id: 1, filename: "a", url: "https://example.test/a", state: "complete", startTime: "2026-10-14T10:00:00Z" },
+      { id: 2, filename: "b", url: "https://example.test/b", state: "in_progress", startTime: "2026-10-14T11:00:00Z" },
+    ],
+  })
+  try {
+    await harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, {
+      id: "dl-filter", tool: "yunti_list_downloads", arguments: { state: "complete" },
+    })
+    const filtered = harness.posted.at(-1).result
+    assert.equal(filtered.returned, 1)
+    assert.equal(filtered.downloads[0].id, 1)
+
+    await harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, {
+      id: "dl-bad", tool: "yunti_list_downloads", arguments: { state: "nonsense" },
+    })
+    assert.match(harness.posted.at(-1).error, /YUNTI_PARAMETER_INVALID/)
+  } finally {
+    harness.restore()
+  }
+})
+
 // Navigation is issued and acknowledged before the new document exists. Naming
 // a stage must therefore wait for a real document change, and must not be
 // satisfied by the outgoing page's readyState.
@@ -304,6 +360,14 @@ const cdpResponses = options.cdpResponses ? [...options.cdpResponses] : null
   const tabUpdatedListeners = new Set()
 
   globalThis.chrome = {
+    // Downloads live on the profile, not on a tab.
+    downloads: {
+      search: async (query) => (options.downloads || []).filter((item) => {
+        if (query.state && item.state !== query.state) return false
+        if (query.id !== undefined && item.id !== query.id) return false
+        return true
+      }),
+    },
     tabs: {
       create: async () => options.createdTab || {
         id: 999,

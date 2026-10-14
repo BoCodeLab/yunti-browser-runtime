@@ -8,7 +8,7 @@
 
 [![install](https://img.shields.io/badge/install-from%20GitHub%20source-2ea44f)](docs/INSTALL.md)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=node.js&logoColor=white)](package.json)
-[![MCP](https://img.shields.io/badge/MCP-53_tools-111111)](docs/TOOL_GUIDE.md)
+[![MCP](https://img.shields.io/badge/MCP-54_tools-111111)](docs/TOOL_GUIDE.md)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
 [首次安装](#快速开始首次安装) · [更新](#更新已安装的版本) · [核心能力](#核心能力) · [工作原理](#工作原理) · [交给-agent-安装](#交给-agent-安装) · [文档](#文档导航)
@@ -271,7 +271,7 @@ server。
 ```mermaid
 flowchart LR
     A["MCP Agent<br/>Codex · Claude Code · Cursor · Cline"]
-    M["Yunti MCP Server<br/>53 browser tools"]
+    M["Yunti MCP Server<br/>54 browser tools"]
     B["Local Bridge<br/>127.0.0.1:48887"]
     C["Browser Controller<br/>one channel per browser/profile"]
     P["Chrome / Edge Tabs<br/>existing login and page state"]
@@ -363,6 +363,7 @@ npm run test:soak
 | 网络请求 | URL、方法、状态码、耗时与脱敏后的请求体预览；不返回 cookie 与 Authorization | 仅本机 Bridge |
 | 截图 | 可见像素，可能包含敏感内容 | 仅本机 Bridge |
 | 学习记忆 | `~/.yunti_agent/` 下的本地 JSON 文件 | 仅本机文件系统 |
+| 下载记录 | 浏览器下载项的文件名（绝对本地路径）、来源 URL、状态、字节数与错误；来源 URL 的查询串会被剥掉。下载**不会被重定向**，文件仍在浏览器自己的下载目录 | 仅本机 Bridge |
 | 操作台账（**默认关闭**） | 工具名、耗时、结果状态、使用了哪类路由字段、参数**键名**与一个单向哈希；不含参数值、页面正文或凭据。设置 `YUNTI_BROWSER_LEDGER=1` 后才写入 `~/.yunti_agent/operations/YYYY-MM-DD.jsonl` | 仅本机文件系统 |
 
 **不会发生的事**：不上传数据到远程服务、不需要平台账号、不写远程日志。Bridge 默认只监听

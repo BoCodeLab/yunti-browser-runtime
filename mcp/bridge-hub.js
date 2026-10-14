@@ -151,6 +151,7 @@ const BROWSER_CONTROLLER_TOOLS = new Set([
   "yunti_get_browser_target",
   "yunti_cdp_send_command",
   "yunti_new_page",
+  "yunti_list_downloads",
 ])
 
 // Browser-level and raw-CDP tools have no single page to bind, so a page handle

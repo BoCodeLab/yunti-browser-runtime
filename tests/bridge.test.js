@@ -2807,7 +2807,7 @@ test("protocol version and version references agree across the shipped surfaces"
   // Every published tool has a schema and a unique name.
   const names = TOOLS.map((tool) => tool.name)
   assert.equal(new Set(names).size, names.length)
-  assert.equal(names.length, 53)
+  assert.equal(names.length, 54)
   for (const tool of TOOLS) {
     assert.equal(typeof tool.inputSchema, "object", `${tool.name} is missing an inputSchema`)
     assert.equal(tool.inputSchema.type, "object", `${tool.name} schema must be an object`)

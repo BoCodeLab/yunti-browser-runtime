@@ -401,6 +401,20 @@ export const TOOLS = [
     },
   },
   {
+    name: "yunti_list_downloads",
+    description:
+      "List downloads recorded in the browser profile, newest first: download id, the absolute local path the browser wrote, state, bytes received against the total, MIME type, timing, whether the file still exists, and any error. Yunti does not redirect downloads — the file stays wherever the browser put it and this tool reports it rather than taking it over. No checksum is available, because computing one would mean reading the downloaded file and an extension cannot do that from chrome.downloads.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        browserSessionId: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum downloads to return, newest first. Defaults to 20." },
+        state: { type: "string", enum: ["in_progress", "interrupted", "complete"], description: "Only return downloads in this state." },
+        downloadId: { type: "integer", description: "Only return this download id." },
+      },
+    },
+  },
+  {
     name: "yunti_cdp_send_command",
     description:
       "Forward one Chrome DevTools Protocol command through the installed Yunti extension. CDP is a first-class browser-operation backend: use it whenever protocol-level observation, targeting, input, navigation, network, emulation, or diagnostics improve reliability. The required userId is the isolation scope; browserSessionId routes the request to that user's extension/browser instance. Optional tabId or targetId selects the concrete Chrome/Edge target inside that browser, including targets listed by yunti_list_browser_targets that are not registered Yunti sessions. Browser method names such as Target.activateTarget, Runtime.evaluate, Page.navigate, Network.enable, and DOM.* are not terminal/shell commands; call them here through the method and params fields. For current-page or multi-step operations, pass both userId and browserSessionId from yunti_get_page_snapshot or the current Yunti browser route so Runtime.evaluate and follow-up calls stay on the same tab. For switching to a specific tab, use yunti_list_browser_targets with userId/browserSessionId to find tabId or targetId, then call Target.activateTarget through this tool.",
@@ -1033,6 +1047,7 @@ const NON_PAGE_TARGET_TOOLS = new Set([
   "yunti_cdp_send_command",
   "yunti_new_page",
   "yunti_close_page",
+  "yunti_list_downloads",
 ])
 
 // Tools that cannot change page, browser or stored state. Everything else —
@@ -1059,6 +1074,7 @@ const READ_ONLY_TOOLS = new Set([
   "yunti_take_snapshot",
   "yunti_wait_for",
   "yunti_read_result_chunk",
+  "yunti_list_downloads",
 ])
 
 installBrowserIsolationSchemas()
@@ -1347,6 +1363,21 @@ export function toolUsageHints(args = {}) {
       notes: [
         "Returns a new browserSessionId for the created tab.",
         "Use the returned browserSessionId for follow-up yunti_* calls on the new tab.",
+      ],
+    },
+    yunti_list_downloads: {
+      purpose: "Report the downloads the browser recorded, including where each file landed.",
+      required: [],
+      recommended: ["browserSessionId", "limit", "state"],
+      notes: [
+        "Yunti does not redirect downloads; filename is the absolute path the browser itself wrote.",
+        "state is in_progress / interrupted / complete, and bytesReceived against totalBytes is how a caller tells a finished download from one still running.",
+        "exists reports whether the file is still on disk, so a moved or cleaned-up file is distinguishable from a failed download.",
+        "No checksum is available: an extension cannot read the downloaded file.",
+      ],
+      commonMistakes: [
+        "Do not assume a download finished because the click that started it returned; check state and bytes.",
+        "Do not expect the file under a Yunti directory — it is wherever the browser put it.",
       ],
     },
     yunti_navigate_page: {
