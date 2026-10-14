@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import { access, appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
@@ -238,6 +239,38 @@ async function runFullToolCoverage(runtime) {
   await call(runtime, "yunti_get_cdp_events", { browserSessionId: session(), limit: 100 })
   await call(runtime, "yunti_clear_console_messages", { browserSessionId: session() })
   await call(runtime, "yunti_clear_cdp_events", { browserSessionId: session() })
+
+  // An oversized evaluate hands the whole serialization to the bridge, which
+  // returns a cursor in its place. Reading it back must reproduce the held text
+  // exactly — that digest is the only proof the slices are the same result and
+  // not a re-run of the expression.
+  const oversized = await call(runtime, "yunti_evaluate_script", {
+    browserSessionId: session(),
+    expression: "({ rows: 'soak'.repeat(400), note: 'chunk-coverage' })",
+    maxLength: 50,
+  })
+  assert.equal(oversized.truncated, true)
+  assert.equal(oversized.value, null, "an oversized structured value must not be advertised as a prefix")
+  assert.ok(oversized.resultId, "a truncated result must expose a resultId")
+  const firstSlice = await call(runtime, "yunti_read_result_chunk", { resultId: oversized.resultId, length: 100 })
+  const secondSlice = await call(runtime, "yunti_read_result_chunk", {
+    resultId: oversized.resultId, offset: firstSlice.nextOffset, length: 100000,
+  })
+  assert.equal(firstSlice.complete, false)
+  assert.equal(secondSlice.complete, true)
+  const rebuilt = firstSlice.text + secondSlice.text
+  assert.equal(
+    createHash("sha256").update(rebuilt, "utf8").digest("hex"),
+    oversized.resultSha256,
+    "the concatenated slices must reproduce the held result"
+  )
+
+  // The isolated profile begins with no downloads. This asserts the call works
+  // and reports honestly, not that a file exists — the download path itself is
+  // covered by the real-browser interaction test.
+  const downloads = await call(runtime, "yunti_list_downloads", { browserSessionId: session(), limit: 5 })
+  assert.equal(Array.isArray(downloads.downloads), true)
+  assert.equal(typeof downloads.matched, "number")
 
   await call(runtime, "yunti_capture_visible_tab", { browserSessionId: session() })
   await call(runtime, "yunti_take_screenshot", { browserSessionId: session(), format: "jpeg", quality: 45 })
