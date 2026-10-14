@@ -215,66 +215,49 @@ server。
 
 ## 交给 Agent 安装或更新
 
-不想自己逐步配置时，把对应的一段整段复制给 Agent。**首次安装**和**更新已有安装**是两套不同步骤，别混用。
+不想自己逐步配置时，把下面整段复制给 Agent——它会先判断属于哪种情况，再走对应分支：
 
 <details>
-<summary><strong>首次安装：展开安装引导提示词</strong></summary>
+<summary><strong>展开安装 / 更新引导提示词</strong></summary>
 
 ```text
-请帮我从 GitHub 源码安装并接入 Yunti Browser Runtime。它是一个本地浏览器运行时，让你通过 MCP 操作我本机 Chrome/Edge 页面。
+请帮我安装或更新 Yunti Browser Runtime。它是一个本地浏览器运行时，让你通过 MCP 操作我本机 Chrome/Edge 页面。
 
-请按步骤引导并尽可能替我执行命令，不要跳步：
+先判断属于哪种情况，再走对应分支，不要跳步：
+- 本机还没有它 → 走【首次安装】
+- 已经有（运行时目录里能跑 npm run doctor，或浏览器扩展列表里能看到 Yunti）→ 走【更新】
 
-1. 确认本机有 Node.js 22+ 和 git。
-2. 让我选一个固定目录来放仓库（例如 Windows 的 D:\tools\yunti-browser-runtime，或 macOS/Linux 的 ~/tools/yunti-browser-runtime），不要放进临时目录，然后执行：
+两种情况都先确认本机有 Node.js 22+ 和 git。
+
+【首次安装】
+1. 让我选一个固定目录放仓库（例如 Windows 的 D:\tools\yunti-browser-runtime，或 macOS/Linux 的 ~/tools/yunti-browser-runtime），不要放进临时目录，然后克隆：
    git clone https://github.com/BoCodeLab/yunti-browser-runtime.git
-   克隆后执行 git fetch --tags 并检出最新的发布 tag（vX.Y.Z）。不要留在 main，main 可能包含尚未发布的改动。
-3. 进入仓库目录执行 npm install，并告诉我这一步是可选的：运行时（MCP server、本地 Bridge、CLI、浏览器扩展）没有任何第三方依赖，跳过也能正常使用；装上的 playwright-core 只服务于真实浏览器测试。
-4. 执行 npm run print-config -- --agent <你的 Agent 名称> --human，把输出的 MCP server 配置写入我当前正在用的这个 Agent。
-5. 执行 npm run install-skill -- --harness <你的 Agent 名称> 装上配套 skill。若提示目标已存在，加 --force 覆盖——旧 skill 里的恢复规则可能与新版本冲突。你的名称不在 codex / claude-code / cursor / cline / dsh 之内时，改用 --dest <目录>，或把 SKILL.md 内容并入本项目的指令文件。
-6. 告诉我 MCP server 会自动启动本地 Bridge，一般不需要单独运行 npm run bridge。
-7. 告诉我扩展目录是 <克隆目录>/extension。源码安装不注册全局命令，后续命令一律用 npm run <命令>。
-8. 只有“加载已解压的扩展程序”这一步需要我在浏览器里确认：引导我打开 chrome://extensions 或 edge://extensions，开启开发者模式并选择该目录。首次加载时浏览器会列出该扩展申请的权限，请逐项如实说明用途，包括 debugger（浏览器自动化）、webRequest（网络诊断）和 downloads（下载记录报告，只读、不接管下载）。
-9. 告诉我默认 Bridge URL 是 http://127.0.0.1:48887，本地默认不需要 token，不需要打开 popup、保存设置或刷新页面。
-10. 执行 npm run doctor，确认它报告的三处版本一致：当前包、正在运行的 bridge、浏览器里加载的扩展。
-11. doctor 正常后调用 yunti_list_browser_targets；选择目标页面并调用 yunti_get_page_snapshot 或 yunti_observe_page 验证控制能力。
-12. 在真实操作我的页面之前，先用一段话明确告诉我这个 runtime 会读取哪些数据——页面内容、控制台消息、网络请求、截图、本机学习记忆，以及默认关闭的操作台账——并说明这些数据只经过本机 127.0.0.1 的 Bridge、不会上传到任何远程服务，然后等我确认再继续。
+   克隆后 git fetch --tags，检出最新的发布 tag（vX.Y.Z）。不要留在 main，main 可能包含尚未发布的改动。
+   用 zip 装的话，从 Releases 下载 Source code (zip) 解压即可。
+2. 执行 npm install，并告诉我这一步是可选的：运行时（MCP server、本地 Bridge、CLI、浏览器扩展）没有第三方依赖，跳过也能正常使用；装上的 playwright-core 只服务于真实浏览器测试。
+3. 执行 npm run print-config -- --agent <你的 Agent 名称> --human，把输出的 MCP server 配置写入我当前正在用的这个 Agent。
+4. 执行 npm run install-skill -- --harness <你的 Agent 名称> 装上配套 skill。提示目标已存在就加 --force 覆盖——旧 skill 里的恢复规则可能与新版本冲突。你的名称不在 codex / claude-code / cursor / cline / dsh 之内时，改用 --dest <目录>，或把 SKILL.md 内容并入本项目的指令文件。
+5. 告诉我 MCP server 会自动启动本地 Bridge，一般不需要单独运行 npm run bridge。
+6. 告诉我扩展目录是 <运行时目录>/extension。源码安装不注册全局命令，后续命令一律用 npm run <命令>。
+7. 只有“加载已解压的扩展程序”这一步需要我在浏览器里确认：引导我打开 chrome://extensions 或 edge://extensions，开启开发者模式并选择该目录。首次加载时浏览器会列出该扩展申请的权限，请逐项如实说明用途，包括 debugger（浏览器自动化）、webRequest（网络诊断）和 downloads（下载记录报告，只读、不接管下载）。
 
-不要遗漏 packaged skill 的安装。不要默认要求我刷新页面、切换标签、重启浏览器或填写 token。页面路由异常时先按结构化 recoveryAction 自动恢复，只有浏览器明确阻止注入且自动恢复失败时才请求我处理。
-
-最后提醒我两件事：克隆目录不要移动或删除，因为 MCP 配置里写的是该目录的绝对路径；以后更新不要直接 git pull，而是换新的发布 tag，并按“更新已有安装”的步骤同时刷新 bridge 进程和浏览器扩展。
-```
-
-</details>
-
-<details>
-<summary><strong>更新已有安装：展开更新引导提示词</strong></summary>
-
-```text
-请帮我更新本机已安装的 Yunti Browser Runtime。运行时目录是 <你的运行时目录>；如果你不确定，先执行 npm run doctor，它会报告当前包、正在运行的 bridge 和浏览器扩展三处版本。
-
-这个工具由三份互相独立的副本组成，更新时必须一起刷新，只换源码是不生效的：
-  1) 磁盘上的源码目录
-  2) 正在运行的 MCP server / Bridge 进程
-  3) 浏览器里加载的扩展
-
-请按顺序执行，不要跳步：
-
-1. 先跑 npm run doctor 记录当前状态，把三处版本读给我听。
-2. 更新源码：
-   - 用 git 安装的：git fetch --tags，然后 git checkout 最新的发布 tag。不要用 git pull 留在 main。
-   - 用 zip 安装的：从 Releases 下载新版 Source code (zip)，解压后把里面的内容覆盖到原运行时目录。注意解压会多出一层目录，不要整个套进去——MCP 配置里写的是原目录的绝对路径。
-   不需要重跑 npm install：运行时没有第三方依赖。
-3. 找出并结束旧的 bridge 进程。这一步不能跳过：只要旧进程还占着 127.0.0.1:48887，新会话启动的 MCP server 就会以 proxy 模式连到它，版本永远停在旧的。Windows 用 netstat -ano | findstr 48887 找 PID；macOS/Linux 用 lsof -ti tcp:48887。
+【更新】这个工具由三份互相独立的副本组成，必须一起刷新——只换源码是不生效的：
+  1) 磁盘上的源码目录  2) 正在运行的 MCP server / Bridge 进程  3) 浏览器里加载的扩展
+1. 先跑 npm run doctor 记录当前状态，把“当前包 / 正在运行的 bridge / 浏览器里加载的扩展”三处版本读给我听。
+2. 更新源码：git 装的用 git fetch --tags 再 git checkout 最新的发布 tag（不要用 git pull 留在 main）；zip 装的重新下载解压并覆盖到原目录。注意解压会多出一层目录，不要整个套进去——MCP 配置里写的是原目录的绝对路径。两种方式都不需要重跑 npm install。
+3. 找出并结束旧的 bridge 进程。这一步不能跳过：只要旧进程还占着 127.0.0.1:48887，新会话启动的 MCP server 就会以 proxy 模式连到它，版本永远停在旧的。Windows 用 netstat -ano | findstr 48887 找 PID，macOS/Linux 用 lsof -ti tcp:48887。
    结束之前先把 PID 和完整命令行念给我确认——本机可能同时跑着多个 Agent 各自的 MCP server，不要误杀无关进程。
-4. 更新已安装的 skill：npm run install-skill -- --harness <你的 Agent 名称> --force。旧 skill 的恢复规则可能与新版本冲突，必须覆盖；每个装过 Yunti skill 的 Agent 都要各跑一次。
-5. 让我在浏览器里重新加载扩展：chrome://extensions 或 edge://extensions → 找到 Yunti → 点“重新加载”。源码安装的扩展不会自动更新。
-   如果新版本新增了权限（例如 0.2.9 增加了 downloads），浏览器会提示我确认；请先说明该权限的用途，再让我点。
+4. 执行 npm run install-skill -- --harness <你的 Agent 名称> --force 覆盖已装的 skill。旧 skill 的恢复规则可能与新版本冲突，必须覆盖；每个装过 Yunti skill 的 Agent 都各跑一次。
+5. 让我在浏览器里重新加载扩展：chrome://extensions 或 edge://extensions → 找到 Yunti → 点“重新加载”。源码安装的扩展不会自动更新。新版本若新增了权限（例如 0.2.9 增加了 downloads），浏览器会提示我确认，请先说明用途再让我点。
 6. 我重载扩展之后，重开一个新的 Agent 会话，让 MCP server 以新版本重新启动并拉起新 bridge。
-7. 再跑一次 npm run doctor，确认三处版本一致、扩展显示 connected、Skill 一项显示 differing copies=0。任何一项不对就停下来告诉我，不要反复重启或反复重试浏览器工具。
-8. 最后用只读工具验一次活体：yunti_list_browser_targets。
 
-更新完成后提醒我：不要移动或删除运行时目录；下次升级重复同样的步骤。
+【两种情况都要做】
+- 执行 npm run doctor，确认三处版本一致、扩展显示 connected、Skill 一项显示 differing copies=0。任何一项不对就停下来告诉我，不要反复重启，也不要反复重试浏览器工具。
+- 用只读工具验一次活体：先 yunti_list_browser_targets，再选一个页面调用 yunti_get_page_snapshot 或 yunti_observe_page，确认能读到内容。
+- 在真实操作我的页面之前，先用一段话明确告诉我这个 runtime 会读取哪些数据——页面内容、控制台消息、网络请求、截图、本机学习记忆，以及默认关闭的操作台账——并说明这些数据只经过本机 127.0.0.1 的 Bridge、不会上传到任何远程服务，然后等我确认再继续。
+- 告诉我默认 Bridge URL 是 http://127.0.0.1:48887，本地不需要 token，不需要打开 popup、保存设置或刷新页面。
+
+不要默认要求我刷新页面、切换标签、重启浏览器或填写 token。页面路由异常时先按结构化 recoveryAction 自动恢复，只有浏览器明确阻止注入且自动恢复失败时才请求我处理。不要遗漏 packaged skill 的安装或更新。最后提醒我：运行时目录不要移动或删除，MCP 配置里写的是它的绝对路径。
 ```
 
 </details>
