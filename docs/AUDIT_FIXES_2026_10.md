@@ -24,3 +24,61 @@ download, worker-target, or recording features.
 Validation proceeds from focused regression tests to the full unit suite, real
 browser interaction checks, and the release gate. Runtime deployment and process
 or extension reload are separate from source validation.
+
+## Verification record (2026-10-14, 0.2.9)
+
+Each required finding was re-checked against the 0.2.9 source. Where the audit
+left a reproducer, that reproducer was re-run across 0.2.7 / 0.2.8 / 0.2.9, so
+the before-and-after is a measurement rather than a re-reading of the code.
+
+| Finding | Evidence | Result |
+| --- | --- | --- |
+| M01 | Real Chromium: uid identity across layout drift and node replacement | Pass |
+| M02 | Audit reproducer ×3 versions: `tabId`, `targetId` and conflicting routes are rejected; a clear no longer deletes another page's records | Fixed |
+| M03 | Audit reproducer ×3 versions: object and array stay parseable; `maxLength:100` returns 100 chars; `maxLength:0` returns none | Fixed |
+| M04 | Real Chromium: a 13 s declared wait is not cut off by the 12 s watchdog | Pass |
+| M05 | Real payload shape: `transportStatus`, `actionStatus` and `errorCategory` are separated | Pass |
+| M06 | `tests/contracts.test.js`: the three terminal codes are distinguished | Pass (unit) |
+| M07 | `tests/contracts.test.js` plus the Hermes adapter regression | Pass |
+| M08 | `integrations/hermes/test_reliability.py`: 8 tests OK | Pass |
+| M09 | Packaged guidance plus real-browser uid identity | Pass |
+| M10 | `tests/contracts.test.js`: validation and dispatch shared across entry points | Pass (unit) |
+| M11 | Real Chromium: `tables[0].totalRows` reports the full row count | Pass |
+| M12 | Documented in `docs/AGENT_WORKFLOW_CONTRACT.md` | Documented |
+| M13 | `tests/contracts.test.js` plus `additionalProperties:false` on all 52 tools | Pass |
+| M14 | Live `doctor` reported 3 differing skill copies, then 0 after `install-skill --force` | Pass |
+
+The audit reproducer for M05 sends a synthetic payload without `action`, so it
+cannot exercise the 0.2.9 status fix; the check above uses the shape the tool
+actually returns.
+
+### Found while verifying
+
+`yunti_wait_for` returned the matched-condition *string* in `found` instead of
+the documented boolean. The content script reports `found: "selector"`, and the
+result literal spread `...match` *after* `found: true`, so the string overwrote
+the boolean on the selector and text paths while `urlContains` stayed boolean.
+The unit test had encoded the wrong shape, which is how it survived into 0.2.8.
+Fixed, with the test corrected.
+
+### Optional findings
+
+| Finding | Status |
+| --- | --- |
+| O01 large-result export and cursor pagination | Not implemented |
+| O02 non-tab CDP targets (worker attach/send/detach) | Not implemented |
+| O03 per-page capability matrix in the inventory | Not implemented |
+| O04 `yunti_fetch_with_cookie` same-origin wording | Not implemented |
+| O05 download and navigation completion closures | Not implemented |
+| O06 typed output, naming and units | Partial: the `found` type is fixed; `maxBytes` still slices JS string length (`extension/content.js:496`) |
+| O07 cross-agent operation ledger | Not implemented |
+| O08 delta reports a text change on a static page | Fixed: the comparison strips the observation-scoped uid |
+| O09 `/health` without `userId` reads as offline | Fixed: reports `scope` / `userSelected`, and `extensionConnected: null` when unscoped |
+
+### Evidence limits
+
+M02, M03 and M05 were verified with the audit's offline reproducer (fixture
+page, fixture bridge). Those prove code behaviour, not a business-page
+end-to-end regression. M06, M07, M10 and M13 rest on unit tests with fixtures.
+No business page was replayed to validate a finding, and the live browser was
+not driven for this record.

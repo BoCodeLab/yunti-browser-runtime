@@ -705,7 +705,14 @@ export class BridgeHub {
       activeSessionId,
       browserControllerSessionId,
       browserControllerSessionIds: userId ? this.controllerSessionIdsForUser(userId) : [],
-      extensionConnected: controllerCount > 0 || pageSessionCount > 0,
+      // This payload is user-scoped: with no selected user nothing is visible,
+      // and reporting that as "extensionConnected: false" reads as an outage.
+      // Name the scope, and only claim a connection state once one was
+      // selected. Cross-user isolation is unchanged — an unscoped caller still
+      // sees no sessions and no counts.
+      scope: userId || null,
+      userSelected: Boolean(userId),
+      extensionConnected: userId ? controllerCount > 0 || pageSessionCount > 0 : null,
       pageSessionCount,
       controllerCount,
       sessions,

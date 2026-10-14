@@ -53,6 +53,35 @@ test("an offline browser is not a closed tab and stale inventory does not prove 
   assert.throws(() => hub.resolveToolRoute(args, "yunti_observe_page"), /YUNTI_PAGE_HANDLE_CLOSED/)
 })
 
+// Health is user-scoped. Without a selected user nothing is visible, and
+// reporting that as extensionConnected:false reads as a bridge outage — the
+// reader cannot tell "not visible to this scope" from "nothing is connected".
+test("health names its scope instead of reporting an unscoped disconnect", () => {
+  const hub = new BridgeHub()
+  hub.registerSession({
+    browserSessionId: "yunti-browser-fixture",
+    browserInstanceId: "yunti-browser-fixture",
+    userId: "local",
+    kind: "browser_controller",
+    liveTabIds: [],
+    capabilities: { singleControllerTransport: true },
+  })
+
+  const scoped = hub.health({ userId: "local" })
+  assert.equal(scoped.scope, "local")
+  assert.equal(scoped.userSelected, true)
+  assert.equal(scoped.extensionConnected, true)
+
+  const unscoped = hub.health()
+  assert.equal(unscoped.scope, null)
+  assert.equal(unscoped.userSelected, false)
+  assert.notEqual(unscoped.extensionConnected, false)
+  assert.equal(unscoped.extensionConnected, null)
+  // Isolation is unchanged: an unscoped caller still sees no sessions.
+  assert.deepEqual(unscoped.sessions, [])
+  assert.equal(unscoped.controllerCount, 0)
+})
+
 // One failure chain shares one retry budget, so the client must be able to read
 // the whole budget off a single failure. Only a stale route is worth retrying,
 // and it is worth exactly one attempt; an uncertain write is never retryable.

@@ -339,6 +339,32 @@ test("DOM observer generates fresh uids for every full observation", () => {
   assert.notEqual(first.observationId, second.observationId)
 })
 
+test("delta text comparison ignores the observation-scoped uids in the text tree", () => {
+  const button = new FakeElement("button", { id: "save" }, {
+    innerText: "Save",
+    rect: { x: 20, y: 20, width: 100, height: 32 },
+  })
+  const observer = loadObserver({
+    document: createDocument([button]),
+    location: new URL("https://example.test/delta-static"),
+  })
+
+  const before = observer.observePage()
+  const delta = observer.observePage({ responseMode: "delta" })
+
+  // The text tree embeds this observation's uid, and the uid scope changes on
+  // every observation — so the raw strings always differ even when the page is
+  // untouched. The delta has to compare what the page says, not which uids this
+  // observation happened to mint.
+  assert.ok(before.textTree.includes(before.elements[0].uid))
+  assert.notEqual(before.observationId, delta.observationId)
+  assert.equal(delta.delta.firstObservation, false)
+  assert.equal(delta.delta.textTreeChanged, false)
+  assert.equal(delta.delta.changedElementCount, 0)
+  assert.equal(delta.delta.pageChanged, false)
+  assert.equal(delta.delta.scrollChanged, false)
+})
+
 test("DOM observer excludes hidden and offscreen elements by default", () => {
   const elements = [
     new FakeElement("button", {}, {

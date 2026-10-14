@@ -462,6 +462,14 @@
     }
   }
 
+  // Every observation mints a new uid scope, so each textTree line carries a
+  // different `[yunti-<scope>-<n>]` prefix even when nothing on the page moved.
+  // Comparing the raw strings therefore reports a text change on every delta;
+  // compare the semantic content instead and leave the uids out of it.
+  function normalizeTextTreeForComparison(textTree) {
+    return String(textTree || "").replace(/^\[yunti-[^\]]*\]/gm, "[]")
+  }
+
   function buildDeltaObservation(observation, previousState) {
     const currentElements = Array.isArray(observation?.elements) ? observation.elements : []
     const currentScrollables = Array.isArray(observation?.scrollableContainers) ? observation.scrollableContainers : []
@@ -475,7 +483,8 @@
       readyState: observation?.page?.readyState || "",
     })
     const sameScroll = previousState?.scrollSignature === JSON.stringify(observation?.scroll || {})
-    const sameTextTree = previousState?.textTree === (observation?.textTree || "")
+    const sameTextTree = normalizeTextTreeForComparison(previousState?.textTree)
+      === normalizeTextTreeForComparison(observation?.textTree)
     const firstDelta = !previousState
     const changedElementCount = changedElements.added.length + changedElements.removed.length + changedElements.updated.length
     const changedScrollableCount = changedScrollables.added.length + changedScrollables.removed.length + changedScrollables.updated.length
