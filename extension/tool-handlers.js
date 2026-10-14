@@ -1,9 +1,15 @@
+// Tools the browser controller answers without a page. This set must stay in
+// step with BROWSER_CONTROLLER_TOOLS in mcp/bridge-hub.js: a browser-level tool
+// missing here is routed like a page tool, and then fails on whatever tab
+// happens to be active rather than doing its job. yunti_list_downloads is
+// browser-profile state and was missing here first.
 const BROWSER_CONTROLLER_TOOLS = new Set([
   "yunti_list_browser_targets",
   "yunti_list_pages",
   "yunti_get_browser_target",
   "yunti_cdp_send_command",
   "yunti_new_page",
+  "yunti_list_downloads",
 ])
 
 export function createToolDispatcher({

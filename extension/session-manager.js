@@ -377,6 +377,7 @@ export function createSessionManager(options = {}) {
     "yunti_list_pages",
     "yunti_get_browser_target",
     "yunti_new_page",
+    "yunti_list_downloads",
   ])
 
   // Three-lane execution model. Before this change one global promise chain

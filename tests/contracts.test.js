@@ -152,6 +152,40 @@ test("an unknown resultId reports an expired handoff rather than a partial answe
   assert.throws(() => hub.readResultChunk({}), /YUNTI_RESULT_HANDOFF_EXPIRED/)
 })
 
+// Three separate sets decide whether a tool needs a page: the bridge picks the
+// route, the extension dispatcher resolves it, and the session manager picks an
+// execution lane. They drifted once — yunti_list_downloads was added to the
+// bridge set only, so the extension resolved a page route for it and the call
+// failed on whatever tab happened to be active. Nothing in a unit test noticed,
+// because the harness's session was always routable. This pins the agreement.
+test("the browser-controller tool sets in the bridge and the extension agree", async () => {
+  const { readFileSync } = await import("node:fs")
+  const { join } = await import("node:path")
+  const { fileURLToPath } = await import("node:url")
+  const root = fileURLToPath(new URL("..", import.meta.url))
+
+  const membersOf = (relative, name) => {
+    const source = readFileSync(join(root, relative), "utf8")
+    const match = source.match(new RegExp(`const ${name} = new Set\\(\\[([^\\]]*)\\]`))
+    assert.ok(match, `${name} not found in ${relative}`)
+    return match[1].split(",").map((entry) => entry.trim().replace(/^"|"$/g, "")).filter(Boolean).sort()
+  }
+
+  const bridge = membersOf("mcp/bridge-hub.js", "BROWSER_CONTROLLER_TOOLS")
+  const dispatcher = membersOf("extension/tool-handlers.js", "BROWSER_CONTROLLER_TOOLS")
+  assert.deepEqual(
+    dispatcher,
+    bridge,
+    "a tool the bridge routes to the controller must also be routed that way inside the extension"
+  )
+
+  // The parallel lane exists to let page-free reads run alongside page work, so
+  // it can only contain controller tools.
+  const parallel = membersOf("extension/session-manager.js", "PARALLEL_BROWSER_TOOLS")
+  const strays = parallel.filter((tool) => !bridge.includes(tool))
+  assert.deepEqual(strays, [], "PARALLEL_BROWSER_TOOLS must be a subset of the controller tools")
+})
+
 test("stdio validates local meta tools before normalizing invalid input", async () => {
   for (const args of [{ extra: true }, []]) {
     const result = await handleJsonRpc({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "yunti_get_tool_usage_hints", arguments: args } }, {})
