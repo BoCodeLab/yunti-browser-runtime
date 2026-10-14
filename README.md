@@ -8,7 +8,7 @@
 
 [![install](https://img.shields.io/badge/install-from%20GitHub%20source-2ea44f)](docs/INSTALL.md)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=node.js&logoColor=white)](package.json)
-[![MCP](https://img.shields.io/badge/MCP-52_tools-111111)](docs/TOOL_GUIDE.md)
+[![MCP](https://img.shields.io/badge/MCP-53_tools-111111)](docs/TOOL_GUIDE.md)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
 [首次安装](#快速开始首次安装) · [更新](#更新已安装的版本) · [核心能力](#核心能力) · [工作原理](#工作原理) · [交给-agent-安装](#交给-agent-安装) · [文档](#文档导航)
@@ -271,7 +271,7 @@ server。
 ```mermaid
 flowchart LR
     A["MCP Agent<br/>Codex · Claude Code · Cursor · Cline"]
-    M["Yunti MCP Server<br/>52 browser tools"]
+    M["Yunti MCP Server<br/>53 browser tools"]
     B["Local Bridge<br/>127.0.0.1:48887"]
     C["Browser Controller<br/>one channel per browser/profile"]
     P["Chrome / Edge Tabs<br/>existing login and page state"]

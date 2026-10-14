@@ -864,6 +864,11 @@ export function createToolDispatcher({
     }
   }
   
+  // Upper bound on the serialization handed to the bridge in one piece. Beyond
+  // this the result is reported as unavailable for chunking rather than pushed
+  // across the loopback and held in memory.
+  const RESULT_HANDOFF_MAX_CHARS = 8_000_000
+
   function serializeResult(value, maxLength) {
     const isText = typeof value === "string"
     let text
@@ -886,9 +891,14 @@ export function createToolDispatcher({
       maxLength,
       encoding: isText ? "text" : "json",
       dataCompleteness: truncated ? "truncated" : "complete",
+      // Hand the full serialization to the bridge, which keeps it in a bounded
+      // window and replaces this field with a cursor. It never reaches the
+      // caller: re-running the expression to get the rest would repeat whatever
+      // side effect it had, and slicing the truncated prefix yields broken JSON.
+      ...(truncated && text.length <= RESULT_HANDOFF_MAX_CHARS ? { oversizedText: text } : {}),
       ...(truncated ? {
         code: "RESULT_TRUNCATED",
-        nextStepHint: "The result exceeds maxLength. Return a bounded slice or select fewer fields; a missing structured value is not an empty result.",
+        nextStepHint: "The result exceeds maxLength. Read it in slices with yunti_read_result_chunk using the returned resultId, or narrow the expression; a missing structured value is not an empty result.",
       } : {}),
     }
   }

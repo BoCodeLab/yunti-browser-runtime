@@ -13,6 +13,10 @@ test("evaluate reports serialized completeness without returning broken JSON", a
       assert.equal(result.truncated, true)
       assert.equal(result.dataCompleteness, "truncated")
       assert.ok(result.totalChars > 100)
+      // The full serialization travels with the result so the bridge can hold
+      // it for chunked reads; the bridge strips it and returns a cursor instead.
+      assert.equal(typeof result.oversizedText, "string")
+      assert.equal(result.oversizedText.length, result.totalChars)
       if (typeof value === "string") assert.equal(result.value.length, 100)
       else assert.equal(result.value, null)
       assert.ok(result.returnedChars <= 100)
@@ -32,6 +36,9 @@ test("evaluate respects zero and exact output limits", async () => {
       const result = harness.posted.at(-1).result
       assert.equal(result.value.length, maxLength)
       assert.equal(result.truncated, maxLength < 5)
+      // Only a truncated read needs a handoff; a complete one must not carry
+      // a copy of itself across the bridge.
+      if (!result.truncated) assert.equal(result.oversizedText, undefined)
     } finally {
       harness.restore()
     }

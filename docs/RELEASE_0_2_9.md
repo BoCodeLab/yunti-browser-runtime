@@ -1,8 +1,9 @@
 # Yunti Browser Runtime 0.2.9 — candidate
 
 This is an unreleased reliability candidate addressing the fourteen required
-findings in the [audit checklist](AUDIT_FIXES_2026_10.md). MCP tool count remains
-52 and extension protocol remains 1. Runtime and extension versions both advance
+findings in the [audit checklist](AUDIT_FIXES_2026_10.md). MCP tool count is 53
+(the 52 existing tools plus `yunti_read_result_chunk`) and extension protocol
+remains 1. Runtime and extension versions both advance
 to 0.2.9 so a partial upgrade cannot silently pair the new contracts with old
 content scripts.
 

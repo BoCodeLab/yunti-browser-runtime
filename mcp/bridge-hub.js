@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { forgetLearningMemory, getLearningMemory, rememberLearning } from "./memory.js"
 import {
   clampNumber,
@@ -9,6 +9,15 @@ import {
   truncateText,
 } from "./redaction.js"
 import { toolUsageHints, BRIDGE_LOCAL_TOOLS } from "./tools.js"
+
+// Bridge-local tools that address no page. Everything else in
+// BRIDGE_LOCAL_TOOLS is a per-page diagnostic and must resolve a route.
+const BRIDGE_UNROUTED_TOOLS = new Set(["yunti_select_page", "yunti_read_result_chunk"])
+
+// Bounded hand-off window for oversized results: enough for a few concurrent
+// exports, small enough that a runaway expression cannot pin bridge memory.
+const RESULT_HANDOFF_LIMIT = 8
+const RESULT_HANDOFF_MAX_CHARS = 8_000_000
 
 export const DEFAULT_TOOL_TIMEOUT_MS = 30_000
 export const CURRENT_EXTENSION_PROTOCOL_VERSION = 1
@@ -286,6 +295,8 @@ export class BridgeHub {
     this.cdpEvents = []
     this.consoleMessages = []
     this.activityEvents = []
+    this.resultHandoffs = new Map()
+    this.resultHandoffSeq = 0
     this.nextNetworkEventId = 1
     this.nextCdpEventId = 1
     this.nextConsoleMsgId = 1
@@ -1495,7 +1506,10 @@ export class BridgeHub {
   }
 
   async callBridgeLocalTool(tool, args = {}) {
-    const diagnostic = BRIDGE_LOCAL_TOOLS.has(tool) && tool !== "yunti_select_page"
+    // Reading back a chunked result is not a page diagnostic: it has no page,
+    // no tab and no session, so routing it like one would demand a
+    // browserSessionId it cannot use and inherit route failures for nothing.
+    const diagnostic = BRIDGE_LOCAL_TOOLS.has(tool) && !BRIDGE_UNROUTED_TOOLS.has(tool)
     let effectiveRoute, routeSource
     if (diagnostic) {
       if (args.allSessions) {
@@ -1518,6 +1532,8 @@ export class BridgeHub {
     switch (tool) {
       case "yunti_select_page":
         return this.selectPage(String(args.browserSessionId || ""), args)
+      case "yunti_read_result_chunk":
+        return this.readResultChunk(args)
       case "yunti_get_network_log":
         return this.listNetworkEvents(args)
       case "yunti_list_network_requests":
@@ -1602,6 +1618,71 @@ export class BridgeHub {
     })
   }
 
+  // A truncated read is a hand-off, not an answer. The extension sends the full
+  // serialization alongside the truncated view; keep it in a small bounded
+  // window and replace it with a cursor, so the caller can page through it
+  // without re-running the expression (which would repeat its side effects) and
+  // without hand-slicing a prefix that is not valid JSON.
+  stashOversizedResult(result) {
+    if (!result || typeof result !== "object" || Array.isArray(result)) return result
+    const full = result.oversizedText
+    if (typeof full !== "string" || !full) return result
+    const { oversizedText, ...rest } = result
+    const resultId = `res-${(this.resultHandoffSeq += 1).toString(36)}-${randomUUID().slice(0, 8)}`
+    const digest = createHash("sha256").update(full, "utf8").digest("hex")
+    this.resultHandoffs.set(resultId, { text: full, digest })
+    let held = 0
+    for (const entry of this.resultHandoffs.values()) held += entry.text.length
+    while (this.resultHandoffs.size > RESULT_HANDOFF_LIMIT || held > RESULT_HANDOFF_MAX_CHARS) {
+      const oldest = this.resultHandoffs.keys().next().value
+      if (oldest === resultId) break
+      held -= this.resultHandoffs.get(oldest).text.length
+      this.resultHandoffs.delete(oldest)
+    }
+    return {
+      ...rest,
+      resultId,
+      resultChars: full.length,
+      resultSha256: digest,
+      chunkHint: "Read this truncated result in slices with yunti_read_result_chunk { resultId, offset, length }. Concatenating every slice reproduces exactly resultSha256.",
+    }
+  }
+
+  readResultChunk(args = {}) {
+    const resultId = String(args.resultId || "")
+    const entry = this.resultHandoffs.get(resultId)
+    if (!entry) {
+      const error = new Error(
+        `YUNTI_RESULT_HANDOFF_EXPIRED: no chunked result is held for ${resultId || "(missing resultId)"}. It was never created, it was evicted by newer oversized results, or the bridge restarted. Re-run the expression that produced it.`
+      )
+      error.structuredFailure = {
+        code: "YUNTI_RESULT_HANDOFF_EXPIRED",
+        retryable: false,
+        retryBudget: 0,
+        recoveryAction: "rerun_the_expression_that_produced_the_result",
+        resultUncertain: false,
+      }
+      throw error
+    }
+    const totalChars = entry.text.length
+    const offset = Math.max(0, Math.min(Math.floor(Number(args.offset) || 0), totalChars))
+    const length = Math.max(1, Math.min(Math.floor(Number(args.length) || 20000), 100000))
+    const text = entry.text.slice(offset, offset + length)
+    const nextOffset = offset + text.length
+    const complete = nextOffset >= totalChars
+    return {
+      resultId,
+      offset,
+      returnedChars: text.length,
+      totalChars,
+      nextOffset,
+      complete,
+      text,
+      resultSha256: entry.digest,
+      ...(complete ? {} : { nextStepHint: `Call again with offset ${nextOffset} for the next slice.` }),
+    }
+  }
+
   submitResult({ browserSessionId, requestId, ok, result, error, failure = null }) {
     const pending = this.pendingRequests.get(requestId)
     if (!pending) return { accepted: false }
@@ -1626,7 +1707,7 @@ export class BridgeHub {
         status: "ok",
         summary: summarizeObject(result),
       })
-      pending.resolve(result ?? null)
+      pending.resolve(this.stashOversizedResult(result) ?? null)
     } else {
       const message = error || "Browser tool failed"
       const structured = normalizeStructuredFailure(failure)

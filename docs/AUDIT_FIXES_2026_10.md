@@ -45,7 +45,7 @@ the before-and-after is a measurement rather than a re-reading of the code.
 | M10 | `tests/contracts.test.js`: validation and dispatch shared across entry points | Pass (unit) |
 | M11 | Real Chromium: `tables[0].totalRows` reports the full row count | Pass |
 | M12 | Documented in `docs/AGENT_WORKFLOW_CONTRACT.md` | Documented |
-| M13 | `tests/contracts.test.js` plus `additionalProperties:false` on all 52 tools | Pass |
+| M13 | `tests/contracts.test.js` plus `additionalProperties:false` on all 53 tools | Pass |
 | M14 | Live `doctor` reported 3 differing skill copies, then 0 after `install-skill --force` | Pass |
 
 The audit reproducer for M05 sends a synthetic payload without `action`, so it

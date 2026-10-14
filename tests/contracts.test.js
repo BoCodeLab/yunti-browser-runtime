@@ -1,5 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import { validateToolArguments } from "../mcp/arguments.js"
 import { classifyToolFailure } from "../mcp/failure-contract.js"
 import { toolOk } from "../mcp/json-rpc.js"
@@ -110,6 +111,45 @@ test("a failure chain offers one shared retry and never replays a terminal route
   const cdpTimeout = classifyToolFailure(new Error("YUNTI_CDP_TIMEOUT: no CDP reply"))
   assert.equal(cdpTimeout.retryBudget, 0)
   assert.equal(cdpTimeout.resultUncertain, true)
+})
+
+// Paging a held result must be cheaper and safer than re-running the
+// expression: no side effect repeats, and the caller can prove it read the
+// whole thing by checking the digest of the concatenated slices.
+test("an oversized result is handed off in chunks instead of re-run", () => {
+  const hub = new BridgeHub()
+  const full = "abcdefghij".repeat(5)
+
+  const handed = hub.stashOversizedResult({ value: null, truncated: true, totalChars: full.length, oversizedText: full })
+  assert.equal(handed.oversizedText, undefined, "the full text must not reach the caller")
+  assert.equal(handed.resultChars, full.length)
+  assert.match(handed.resultSha256, /^[0-9a-f]{64}$/)
+
+  const first = hub.readResultChunk({ resultId: handed.resultId, length: 20 })
+  assert.equal(first.text, full.slice(0, 20))
+  assert.equal(first.nextOffset, 20)
+  assert.equal(first.complete, false)
+  assert.match(first.nextStepHint, /offset 20/)
+
+  const second = hub.readResultChunk({ resultId: handed.resultId, offset: first.nextOffset, length: 100 })
+  assert.equal(second.complete, true)
+  assert.equal(second.nextStepHint, undefined)
+
+  const rebuilt = first.text + second.text
+  assert.equal(rebuilt, full)
+  assert.equal(createHash("sha256").update(rebuilt, "utf8").digest("hex"), handed.resultSha256)
+})
+
+test("a result that was not oversized passes through untouched", () => {
+  const hub = new BridgeHub()
+  const plain = { value: "small", truncated: false, totalChars: 5 }
+  assert.deepEqual(hub.stashOversizedResult(plain), plain)
+})
+
+test("an unknown resultId reports an expired handoff rather than a partial answer", () => {
+  const hub = new BridgeHub()
+  assert.throws(() => hub.readResultChunk({ resultId: "res-does-not-exist" }), /YUNTI_RESULT_HANDOFF_EXPIRED/)
+  assert.throws(() => hub.readResultChunk({}), /YUNTI_RESULT_HANDOFF_EXPIRED/)
 })
 
 test("stdio validates local meta tools before normalizing invalid input", async () => {

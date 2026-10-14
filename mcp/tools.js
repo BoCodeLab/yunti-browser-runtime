@@ -941,6 +941,20 @@ export const TOOLS = [
     },
   },
   {
+    name: "yunti_read_result_chunk",
+    description:
+      "Read one slice of a result that yunti_evaluate_script returned truncated. The bridge keeps the full serialization in a bounded window and returns a resultId next to the truncated view; page through it with offset/length instead of re-running the expression, which would repeat whatever side effect it had. resultSha256 identifies the whole result, so concatenating every slice can be checked against it. A resultId is not durable: newer oversized results evict it and a bridge restart loses it, which reports YUNTI_RESULT_HANDOFF_EXPIRED rather than returning a partial answer.",
+    inputSchema: {
+      type: "object",
+      required: ["resultId"],
+      properties: {
+        resultId: { type: "string", description: "The resultId returned alongside a truncated yunti_evaluate_script result." },
+        offset: { type: "integer", minimum: 0, description: "Start offset in UTF-16 string units. Defaults to 0; each slice returns nextOffset to continue from." },
+        length: { type: "integer", minimum: 1, maximum: 100000, description: "Maximum characters to return. Defaults to 20000." },
+      },
+    },
+  },
+  {
     name: "yunti_take_snapshot",
     description:
       "Take an accessibility-tree-based snapshot with fresh observation-scoped uids. Snapshot node positions and identity are rechecked before uid actions; another snapshot invalidates earlier uids. Prefer yunti_observe_page for DOM-bound interaction targets.",
@@ -981,6 +995,7 @@ export const BRIDGE_LOCAL_TOOLS = new Set([
   "yunti_clear_console_messages",
   "yunti_list_network_requests",
   "yunti_get_network_request",
+  "yunti_read_result_chunk",
 ])
 
 export const MEMORY_LOCAL_TOOLS = new Set([
@@ -1032,6 +1047,7 @@ const READ_ONLY_TOOLS = new Set([
   "yunti_take_screenshot",
   "yunti_take_snapshot",
   "yunti_wait_for",
+  "yunti_read_result_chunk",
 ])
 
 installBrowserIsolationSchemas()
@@ -1295,6 +1311,22 @@ export function toolUsageHints(args = {}) {
         },
       ],
       commonMistakes: ["Use expression, not script."],
+    },
+    yunti_read_result_chunk: {
+      purpose: "Page through a yunti_evaluate_script result that was returned truncated.",
+      required: ["resultId"],
+      recommended: ["resultId", "offset", "length"],
+      notes: [
+        "yunti_evaluate_script returns resultId, resultChars and resultSha256 next to the truncated view when the serialization exceeds maxLength.",
+        "Walk it with offset/length; each slice returns nextOffset and complete. Concatenating every slice reproduces resultSha256 exactly.",
+        "The window holds a few results at a time. Evicted or post-restart ids report YUNTI_RESULT_HANDOFF_EXPIRED with retryBudget=0.",
+        "This tool reads bridge memory; it takes no browserSessionId, tabId or pageHandleId and routes to no page.",
+      ],
+      commonMistakes: [
+        "Do not re-run the expression to get the rest of an oversized result; that repeats its side effects. Page the held result instead.",
+        "Do not treat a truncated value as an empty result. value:null with truncated:true means the data exists and is held under resultId.",
+        "Do not assume resultId is durable across a bridge restart. Re-run only after the handoff expired, and verify state first when the expression wrote anything.",
+      ],
     },
     yunti_new_page: {
       purpose: "Create a new browser tab.",
