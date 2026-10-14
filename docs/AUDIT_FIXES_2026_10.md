@@ -66,7 +66,7 @@ Fixed, with the test corrected.
 | Finding | Status |
 | --- | --- |
 | O01 large-result export and cursor pagination | Not implemented |
-| O02 non-tab CDP targets (worker attach/send/detach) | Not implemented |
+| O02 non-tab CDP targets (worker attach/send/detach) | Verified infeasible, documented instead. `chrome.debugger.attach({targetId})` does work on a non-tab target — attach, `sendCommand` and `detach` all succeeded against the extension's own service worker — but a page's dedicated worker is never listed by `chrome.debugger.getTargets()`, `Target.setAutoAttach` succeeds without surfacing it, and `Target.getTargets` through an extension debuggee is refused with `Not allowed`. The gap is Chrome's, so no worker tool is shipped; `yunti_cdp_send_command` now states this so agents stop probing for a worker target. Run `node scripts/probe-worker-target.mjs` to reproduce. |
 | O03 per-page capability matrix in the inventory | Not implemented |
 | O04 `yunti_fetch_with_cookie` same-origin wording | Not implemented |
 | O05 download and navigation completion closures | Not implemented |

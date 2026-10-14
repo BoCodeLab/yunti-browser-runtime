@@ -1234,6 +1234,7 @@ export function toolUsageHints(args = {}) {
         },
       ],
       commonMistakes: [
+        "Worker and other non-tab targets cannot be reached: chrome.debugger.getTargets() does not list a page's dedicated worker, Target.setAutoAttach succeeds but still does not surface it, and Target.getTargets through an extension debuggee is refused with \"Not allowed\". Use page-level CDP instead of looking for a worker target.",
         "Do not run CDP method names in a shell.",
         "params must be an object when provided; do not pass a string or array.",
         "For tab operations, pass top-level tabId or targetId together with browserSessionId.",
