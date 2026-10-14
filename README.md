@@ -363,6 +363,7 @@ npm run test:soak
 | 网络请求 | URL、方法、状态码、耗时与脱敏后的请求体预览；不返回 cookie 与 Authorization | 仅本机 Bridge |
 | 截图 | 可见像素，可能包含敏感内容 | 仅本机 Bridge |
 | 学习记忆 | `~/.yunti_agent/` 下的本地 JSON 文件 | 仅本机文件系统 |
+| 操作台账（**默认关闭**） | 工具名、耗时、结果状态、使用了哪类路由字段、参数**键名**与一个单向哈希；不含参数值、页面正文或凭据。设置 `YUNTI_BROWSER_LEDGER=1` 后才写入 `~/.yunti_agent/operations/YYYY-MM-DD.jsonl` | 仅本机文件系统 |
 
 **不会发生的事**：不上传数据到远程服务、不需要平台账号、不写远程日志。Bridge 默认只监听
 `127.0.0.1`；需要更严格的边界时设置 `YUNTI_BROWSER_BRIDGE_TOKEN`，并在扩展 popup 里

@@ -12,6 +12,7 @@ import {
 } from "./http-server.js"
 import { jsonRpcErr, jsonRpcOk, toolError, toolOk } from "./json-rpc.js"
 import { forgetLearningMemory, getLearningMemory, rememberLearning } from "./memory.js"
+import { createOperationLedger, describeOperation } from "../lib/operation-ledger.js"
 import {
   BRIDGE_LOCAL_TOOLS,
   BROWSER_SCOPED_TOOLS,
@@ -41,6 +42,9 @@ const _ROUTE_USER_ID = process.env.YUNTI_BROWSER_USER_ID || "local"
 const _ROUTE_USER_NAME = process.env.YUNTI_BROWSER_USER_NAME || "local"
 const PACKAGE_VERSION = packageJson.version || ""
 const proxyCompatibilityCache = new Map()
+// Optional local operation ledger; off unless YUNTI_BROWSER_LEDGER=1.
+const operationLedger = createOperationLedger()
+let ledgerClient = null
 // Concurrency ceiling for in-flight JSON-RPC requests. An MCP client may issue
 // several calls before earlier ones finish; answering them one at a time made a
 // single slow browser call block every faster call behind it.
@@ -252,6 +256,13 @@ export async function handleJsonRpc(req, bridge) {
   if (req.id === undefined || req.id === null) return null
 
   if (req.method === "initialize") {
+    const clientInfo = req.params?.clientInfo
+    if (clientInfo && typeof clientInfo === "object" && clientInfo.name) {
+      ledgerClient = {
+        name: String(clientInfo.name).slice(0, 80),
+        version: String(clientInfo.version || "").slice(0, 40),
+      }
+    }
     return jsonRpcOk(req.id, {
       protocolVersion: "2024-11-05",
       serverInfo: { name: SERVER_NAME, version: PACKAGE_VERSION },
@@ -269,11 +280,32 @@ export async function handleJsonRpc(req, bridge) {
     if (!TOOLS.some((tool) => tool.name === name)) {
       return jsonRpcErr(req.id, -32602, `unknown tool: ${name}`)
     }
+    const startedAt = Date.now()
+    // Recording is fire-and-forget and never awaited on the response path: a
+    // slow or unwritable ledger must not add latency to, or fail, a tool call.
+    const record = (status, result, failure) => {
+      if (!operationLedger.enabled) return
+      operationLedger.record(describeOperation({
+        tool: name,
+        args,
+        status,
+        result,
+        failure,
+        durationMs: Date.now() - startedAt,
+        transport: bridge?.mode || "",
+        userId: String(args.userId || _ROUTE_USER_ID || ""),
+        client: ledgerClient,
+        version: PACKAGE_VERSION,
+        requestId: req.id ?? null,
+      }))
+    }
     try {
       const result = await callTool(bridge, name, args)
+      record("completed", result, null)
       return jsonRpcOk(req.id, toolOk(annotateDataFreshness(name, result)))
     } catch (error) {
       const failure = classifyToolFailure(error, name)
+      record("failed", null, failure)
       return jsonRpcOk(
         req.id,
         toolError(failure.message, failure)
