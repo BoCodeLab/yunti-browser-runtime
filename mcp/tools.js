@@ -174,7 +174,7 @@ export const TOOLS = [
   {
     name: "yunti_fetch_with_cookie",
     description:
-      "Ask the browser extension to fetch an internal platform URL with the current browser login cookies. Cookie values are never returned.",
+      "Fetch a same-origin URL from the current page with that page's login cookies attached; cookie values are never returned. Same-origin only: a cross-origin URL is rejected. This replays one plain request and inherits no signature, encryption or risk-control handling from the site's own client, so a site that signs its requests, encrypts its bodies or gates on behaviour will still reject it — check the response body's business code rather than trusting the HTTP status.",
     inputSchema: {
       type: "object",
       required: ["url"],
@@ -184,7 +184,7 @@ export const TOOLS = [
         method: { type: "string", default: "GET" },
         headers: { type: "object", additionalProperties: { type: "string" } },
         body: { type: "string" },
-        maxBytes: { type: "integer", minimum: 1024, maximum: 1000000 },
+        maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, description: "Maximum response body size in UTF-8 bytes. The result reports returnedBytes and totalBytes." },
         confirmed: {
           type: "boolean",
           description: "Set true only after the user approved a dangerous non-read request.",
@@ -1009,11 +1009,37 @@ const NON_PAGE_TARGET_TOOLS = new Set([
   "yunti_close_page",
 ])
 
+// Tools that cannot change page, browser or stored state. Everything else —
+// including yunti_evaluate_script and yunti_cdp_send_command, whose effect is
+// whatever the caller writes — is reported as not read-only so a client cannot
+// mistake "no arguments needed" for "no side effects".
+const READ_ONLY_TOOLS = new Set([
+  "yunti_get_tool_usage_hints",
+  "yunti_get_page_snapshot",
+  "yunti_observe_page",
+  "yunti_find_elements",
+  "yunti_get_selected_context",
+  "yunti_list_browser_targets",
+  "yunti_list_pages",
+  "yunti_get_browser_target",
+  "yunti_get_network_log",
+  "yunti_list_network_requests",
+  "yunti_get_network_request",
+  "yunti_list_console_messages",
+  "yunti_get_console_message",
+  "yunti_get_cdp_events",
+  "yunti_get_learning_memory",
+  "yunti_take_screenshot",
+  "yunti_take_snapshot",
+  "yunti_wait_for",
+])
+
 installBrowserIsolationSchemas()
 
 function installBrowserIsolationSchemas() {
   for (const tool of TOOLS) {
     tool.inputSchema.additionalProperties = false
+    tool.annotations = { ...(tool.annotations || {}), readOnlyHint: READ_ONLY_TOOLS.has(tool.name) }
     const schema = tool.inputSchema || { type: "object" }
     schema.properties = schema.properties || {}
     schema.properties.userId = {

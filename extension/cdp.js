@@ -277,6 +277,28 @@ export function createCdpController({
     }
   }
 
+  // What an agent can rely on for a tab before spending a call on it. Only
+  // DOM observation depends on the content script being injectable; closing and
+  // CDP do not, so a restricted page must still report those as available
+  // instead of reading as a dead tab the agent should give up on.
+  function capabilitiesFor(url) {
+    const value = String(url || "")
+    const scheme = value.split(":")[0].toLowerCase()
+    const webScheme = scheme === "http" || scheme === "https"
+    return {
+      canObserve: webScheme,
+      canCDP: true,
+      canClose: true,
+      canDetach: true,
+      // A true canObserve means "not excluded by scheme": Chrome also refuses
+      // the Web Store and enterprise-policy hosts, which only shows up when the
+      // injection is attempted.
+      capabilityReason: webScheme
+        ? "web scheme; a policy-blocked page can still refuse injection"
+        : `${scheme || "unknown"} scheme cannot host the content script; use CDP, close or detach instead`,
+    }
+  }
+
   async function listBrowserTargets(session) {
     const cdpResult = await interceptTargetGetTargets(session)
     const targetInfos = Array.isArray(cdpResult?.result?.targetInfos)
@@ -305,6 +327,7 @@ export function createCdpController({
           url: target.url || "",
           title: target.title || "",
           active: Boolean(target.active),
+          ...capabilitiesFor(target.url),
           source: "Target.getTargets",
         }
       })

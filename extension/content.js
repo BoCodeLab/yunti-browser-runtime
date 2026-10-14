@@ -487,14 +487,37 @@ async function fetchWithCookie(args) {
   })
   const maxBytes = clamp(Number(args.maxBytes || 200000), 1024, 1000000)
   const text = await response.text()
+  const capped = truncateToUtf8Bytes(text, maxBytes)
   return {
     url: url.toString(),
     status: response.status,
     ok: response.ok,
     redirected: response.redirected,
     contentType: response.headers.get("content-type"),
-    body: text.slice(0, maxBytes),
-    truncated: text.length > maxBytes,
+    body: capped.text,
+    truncated: capped.truncated,
+    returnedBytes: capped.returnedBytes,
+    totalBytes: capped.totalBytes,
+  }
+}
+
+// `maxBytes` promises bytes, so measure UTF-8 bytes rather than JS string
+// length: one CJK character is three bytes and one emoji is four, and a caller
+// sizing a buffer against the old count would under-read by that factor.
+function truncateToUtf8Bytes(text, maxBytes) {
+  const encoded = new TextEncoder().encode(text)
+  const totalBytes = encoded.length
+  if (totalBytes <= maxBytes) {
+    return { text, truncated: false, returnedBytes: totalBytes, totalBytes }
+  }
+  // Do not cut a multi-byte sequence in half: walk back off continuation bytes.
+  let end = maxBytes
+  while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1
+  return {
+    text: new TextDecoder().decode(encoded.subarray(0, end)),
+    truncated: true,
+    returnedBytes: end,
+    totalBytes,
   }
 }
 
