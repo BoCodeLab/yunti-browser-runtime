@@ -10,8 +10,37 @@
    `observe -> act by fresh uid -> observe/verify` for page operations.
 5. Read `retryable`, `retryBudget`, `recoveryAction`, and `resultUncertain`.
    The entire recovery chain shares one budget; never retry an expired id.
-6. For multi-step page work, prefer one stable `browserSessionId` throughout the
-   task.
+6. For multi-step page actions, prefer `pageHandleId`; diagnostics use their
+   documented `browserSessionId`. Independent tasks use independent tabs.
+
+## Reliability contract
+
+- Unknown arguments are rejected before browser execution. `timeout_ms` is not
+  `timeoutMs`. Both HTTP tool endpoints use the same dispatcher as local MCP.
+- `yunti_evaluate_script.timeoutMs` is the CDP execution budget (250–60000 ms,
+  default 10000); `awaitPromise:true` is required for completed async results.
+  The transport includes bounded overhead. Timeouts cannot undo side effects.
+- `maxLength` counts UTF-16 string units, and zero means zero content. Oversized
+  objects/arrays return `value:null` and `truncated:true`, with total/returned
+  sizes and a hint to request a smaller slice. JSON is never cut into a prefix
+  and advertised as complete.
+- Network, console and CDP-buffer diagnostics accept `browserSessionId`, not a
+  page handle or raw tab/target id. Results expose `effectiveRoute`/`routeSource`.
+  Clear operations require an explicit page or `allSessions:true`.
+- `transportStatus` is separate from `actionStatus`, per-field outcomes and
+  `dataCompleteness`. A normal empty query or failed event is not an RPC fault.
+- Snapshot tables are previews of rendered DOM, including header rows. Inspect
+  total/returned rows and columns, `isPreview`, `truncated` and `tablesTruncated`.
+- `YUNTI_BROWSER_INSTANCE_OFFLINE` and `YUNTI_INVENTORY_STALE` do not establish
+  tab closure. Follow `recoveryAction`; do not spend multiple retry budgets.
+- UID actions bind the observed node. Another observation invalidates earlier
+  uids; optional `observationId` rejects interleaved observations explicitly.
+- Pagination requires page/loading/count/fingerprint postconditions before
+  collecting. Whole-page repetition is an error; dynamic cross-page duplicates
+  need their own interpretation. Fixed sleep alone is not a completion check.
+
+See [the audit fix checklist](AUDIT_FIXES_2026_10.md) and the
+[Hermes profile adapter](../integrations/hermes/README.md).
 
 In `0.2.4+`, Microsoft Edge sleeping tabs use bounded recovery. If background
 injection stalls, Yunti may briefly activate the target and then restore the

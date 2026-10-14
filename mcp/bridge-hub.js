@@ -8,7 +8,7 @@ import {
   redactLikelySensitiveText,
   truncateText,
 } from "./redaction.js"
-import { toolUsageHints } from "./tools.js"
+import { toolUsageHints, BRIDGE_LOCAL_TOOLS } from "./tools.js"
 
 export const DEFAULT_TOOL_TIMEOUT_MS = 30_000
 export const CURRENT_EXTENSION_PROTOCOL_VERSION = 1
@@ -608,6 +608,7 @@ export class BridgeHub {
       browserSessionId,
       userId: routeUserId,
       registeredAt: meta.registeredAt || existing.meta.registeredAt || isoNow(now),
+      ...(Array.isArray(meta.liveTabIds) ? { inventoryCapturedAt: meta.inventoryCapturedAt || isoNow(now) } : {}),
     })
     this.sessions.set(browserSessionId, existing)
     const userId = normalizeRouteUserId(existing.meta.userId)
@@ -787,6 +788,8 @@ export class BridgeHub {
 
   resolveSessionId(args) {
     this.cleanupExpiredSessions()
+    const unsupported = ["tabId", "targetId", "pageHandleId"].filter(key => args?.[key] !== undefined)
+    if (unsupported.length) throw new Error(`YUNTI_PARAMETER_INVALID: diagnostic tools require browserSessionId; unsupported route fields: ${unsupported.join(", ")}`)
     const userId = requireRouteUserId(args, "Yunti browser session routing")
     const explicit = String(args?.browserSessionId || "").trim()
     const browserSessionId = explicit || this.activeSessionByUser.get(userId) || ""
@@ -799,6 +802,9 @@ export class BridgeHub {
     }
     if (normalizeRouteUserId(session.meta?.userId) !== userId) {
       throw new Error(`browser session is not owned by userId: ${userId}`)
+    }
+    if (args.browserInstanceId && args.browserInstanceId !== normalizeBrowserInstanceId(session.meta)) {
+      throw new Error("YUNTI_PARAMETER_INVALID: browserInstanceId conflicts with the selected diagnostic page")
     }
     return browserSessionId
   }
@@ -872,8 +878,8 @@ export class BridgeHub {
     if (matchingInstance.length === 0) {
       return {
         ok: false,
-        code: "PAGE_HANDLE_CLOSED",
-        message: `YUNTI_PAGE_HANDLE_CLOSED: the browser instance that owns ${parsedHandle.raw} is not connected. The handle is terminal for this request. retryable=false retryBudget=0`,
+        code: "BROWSER_INSTANCE_OFFLINE",
+        message: `YUNTI_BROWSER_INSTANCE_OFFLINE: the browser instance that owns ${parsedHandle.raw} is not connected. Tab closure has not been established. Wait for the controller, then list targets. retryable=false retryBudget=0`,
       }
     }
     if (matchingInstance.length > 1) {
@@ -885,6 +891,13 @@ export class BridgeHub {
     }
     const controller = matchingInstance[0]
     const liveTabIds = controllerLiveTabIds(controller)
+    const inventoryAgeMs = Date.now() - Date.parse(controller.meta.inventoryCapturedAt || "")
+    if (!liveTabIds || (!liveTabIds.has(parsedHandle.tabId) && (!Number.isFinite(inventoryAgeMs) || inventoryAgeMs > 15000))) {
+      return {
+        ok: false, code: "INVENTORY_STALE", inventoryAgeMs,
+        message: `YUNTI_INVENTORY_STALE: the cached tab inventory cannot establish whether ${parsedHandle.raw} is closed. List targets before choosing the page route. retryable=false retryBudget=0`,
+      }
+    }
     if (liveTabIds && !liveTabIds.has(parsedHandle.tabId)) {
       return {
         ok: false,
@@ -927,7 +940,14 @@ export class BridgeHub {
     }
     const handleRoute = parsedHandle ? this.resolveHandleRoute(userId, parsedHandle) : null
     if (handleRoute && !handleRoute.ok) {
-      throw new Error(handleRoute.message)
+      const error = new Error(handleRoute.message)
+      error.structuredFailure = {
+        code: `YUNTI_${handleRoute.code}`, retryable: false, retryBudget: 0,
+        recoveryAction: handleRoute.code === "BROWSER_INSTANCE_OFFLINE" ? "wait_for_controller_then_list_targets" : "list_targets_then_select_live_page",
+        resultUncertain: false,
+        diagnostics: { reason: handleRoute.code, inventoryAgeMs: handleRoute.inventoryAgeMs },
+      }
+      throw error
     }
     if (handleRoute && requestedTabId && requestedTabId !== parsedHandle.tabId) {
       throw new Error(
@@ -1468,6 +1488,26 @@ export class BridgeHub {
   }
 
   async callBridgeLocalTool(tool, args = {}) {
+    const diagnostic = BRIDGE_LOCAL_TOOLS.has(tool) && tool !== "yunti_select_page"
+    let effectiveRoute, routeSource
+    if (diagnostic) {
+      if (args.allSessions) {
+        if (["browserSessionId", "tabId", "targetId", "pageHandleId", "browserInstanceId"].some(key => args[key] !== undefined)) throw new Error("YUNTI_PARAMETER_INVALID: allSessions cannot be combined with an explicit page route")
+        routeSource = "all-user-sessions"
+        effectiveRoute = { userId: requireRouteUserId(args, tool), allSessions: true }
+      } else {
+        if (tool.startsWith("yunti_clear_") && !args.browserSessionId) throw new Error("YUNTI_PARAMETER_INVALID: clearing diagnostics requires browserSessionId or allSessions:true")
+        const browserSessionId = this.resolveSessionId(args)
+        const session = this.getLiveSession(browserSessionId)
+        effectiveRoute = { browserSessionId, tabId: session.meta.tabId, browserInstanceId: normalizeBrowserInstanceId(session.meta) }
+        routeSource = args.browserSessionId ? "explicit" : "active"
+      }
+    }
+    const result = await this.executeBridgeLocalTool(tool, args)
+    return diagnostic ? { ...result, effectiveRoute, routeSource } : result
+  }
+
+  async executeBridgeLocalTool(tool, args = {}) {
     switch (tool) {
       case "yunti_select_page":
         return this.selectPage(String(args.browserSessionId || ""), args)
@@ -1564,6 +1604,14 @@ export class BridgeHub {
     clearTimeout(pending.timer)
     this.pendingRequests.delete(requestId)
     if (ok) {
+      const controller = this.sessions.get(pending.transportSessionId)
+      if (isBrowserControllerSession(controller) && ["yunti_list_browser_targets", "yunti_list_pages"].includes(pending.tool) && Array.isArray(result?.pages)) {
+        this.refreshSession(controller, Date.now(), {
+          liveTabIds: result.pages.map(page => normalizeTabId(page.tabId)).filter(Boolean),
+          tabHandles: Object.fromEntries(result.pages.filter(page => page.tabId && page.pageHandleId).map(page => [String(page.tabId), page.pageHandleId])),
+          inventoryCapturedAt: isoNow(),
+        })
+      }
       this.recordActivity({
         type: "tool-result",
         tool: pending.tool,

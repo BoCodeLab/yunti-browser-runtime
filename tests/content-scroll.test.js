@@ -399,6 +399,7 @@ test("content click selector auto-waits for element appearance", async () => {
   let ready = false
   const context = createContentHarness()
   context.document.querySelector = (selector) => selector === "#menu" && ready ? button : null
+  context.document.elementFromPoint = () => ready ? button : null
   setTimeout(() => { ready = true }, 50)
 
   const result = await context.clickElement({ selector: "#menu", timeoutMs: 250 })
@@ -416,6 +417,7 @@ test("content fill selector auto-waits for disabled target to become enabled", a
   input.disabled = true
   const context = createContentHarness()
   context.document.querySelector = (selector) => selector === "#name" ? input : null
+  context.document.elementFromPoint = () => input
   setTimeout(() => { input.disabled = false }, 50)
 
   const result = await context.fillElement({ selector: "#name", value: "Yunti", timeoutMs: 250 })

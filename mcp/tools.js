@@ -599,7 +599,7 @@ export const TOOLS = [
       type: "object",
       properties: {
         browserSessionId: { type: "string" },
-        uid: { type: "string", description: "Fresh uid from yunti_observe_page or yunti_take_snapshot (e.g. yunti-1). Takes precedence over selector." },
+        uid: { type: "string", description: "Fresh uid from the selected page's current observation or snapshot. Takes precedence over selector; another observation invalidates it." },
         selector: { type: "string", description: "CSS selector. Used when uid is not provided." },
         x: { type: "number", description: "Viewport x coordinate fallback. Use together with y; yunti_click_at is preferred for coordinate-only clicks." },
         y: { type: "number", description: "Viewport y coordinate fallback. Use together with x; yunti_click_at is preferred for coordinate-only clicks." },
@@ -615,7 +615,7 @@ export const TOOLS = [
       type: "object",
       properties: {
         browserSessionId: { type: "string" },
-        uid: { type: "string", description: "Fresh uid from yunti_observe_page or yunti_take_snapshot (e.g. yunti-1). Takes precedence over selector." },
+        uid: { type: "string", description: "Fresh uid from the selected page's current observation or snapshot. Takes precedence over selector; another observation invalidates it." },
         selector: { type: "string", description: "CSS selector fallback. The element center is resolved and hovered through CDP." },
         x: { type: "number", description: "Viewport x coordinate fallback. Use together with y." },
         y: { type: "number", description: "Viewport y coordinate fallback. Use together with x." },
@@ -935,14 +935,15 @@ export const TOOLS = [
         browserSessionId: { type: "string", description: "Target browser session." },
         expression: { type: "string", description: "JavaScript expression to evaluate." },
         awaitPromise: { type: "boolean", description: "Wait for the returned promise to resolve. Defaults to false." },
-        maxLength: { type: "integer", minimum: 0, maximum: 100000, description: "Max result length. Defaults to 10000." },
+        timeoutMs: { type: "integer", minimum: 250, maximum: 60000, description: "Runtime.evaluate execution budget in milliseconds. Defaults to 10000. Timeout does not undo side effects; verify state before repeating." },
+        maxLength: { type: "integer", minimum: 0, maximum: 100000, description: "Maximum returned UTF-16 string units. Defaults to 10000; zero returns no value content. Oversized objects/arrays return value:null with truncated:true and totalChars, never broken JSON." },
       },
     },
   },
   {
     name: "yunti_take_snapshot",
     description:
-      "Take an accessibility-tree-based snapshot of the current page. Returns stable uids (yunti-1, yunti-2, ...) for each interactive element. Use these uids with yunti_click, yunti_fill, and yunti_hover. Prefer this over raw selectors or coordinates.",
+      "Take an accessibility-tree-based snapshot with fresh observation-scoped uids. Snapshot node positions and identity are rechecked before uid actions; another snapshot invalidates earlier uids. Prefer yunti_observe_page for DOM-bound interaction targets.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1012,7 +1013,7 @@ installBrowserIsolationSchemas()
 
 function installBrowserIsolationSchemas() {
   for (const tool of TOOLS) {
-    if (MEMORY_LOCAL_TOOLS.has(tool.name)) continue
+    tool.inputSchema.additionalProperties = false
     const schema = tool.inputSchema || { type: "object" }
     schema.properties = schema.properties || {}
     schema.properties.userId = {
@@ -1020,6 +1021,16 @@ function installBrowserIsolationSchemas() {
       description:
         "Optional local route user id. Defaults to YUNTI_BROWSER_USER_ID or local in the standalone runtime.",
     }
+    schema.properties.userName = { type: "string", description: "Optional display name for the local route user." }
+    if (MEMORY_LOCAL_TOOLS.has(tool.name)) {
+      tool.inputSchema = schema
+      continue
+    }
+    if (tool.name === "yunti_click" || tool.name === "yunti_fill" || tool.name === "yunti_hover" || tool.name === "yunti_select" || tool.name === "yunti_type_text" || tool.name === "yunti_press_key") {
+      schema.properties.timeoutMs = { type: "integer", minimum: 0, maximum: 5000, description: "Bounded element-readiness wait in milliseconds; not the total operation deadline." }
+      schema.properties.observationId = { type: "string", description: "Optional observationId from the observation that supplied uid. A mismatched observation is rejected before acting." }
+    }
+    if (schema.properties.uid) schema.properties.observationId ||= { type: "string", description: "Optional id of the observation that supplied uid; stale observations are rejected before acting." }
     schema.properties.browserInstanceId ||= {
       type: "string",
       description:
@@ -1494,7 +1505,7 @@ export function toolUsageHints(args = {}) {
     }
   }
   return {
-    version: "2026-07-22",
+    version: "2026-10-14",
     coreRules: [
       "Every browser-facing yunti_* tool call requires userId.",
       "browserSessionId is the current user's browser route; tabId and targetId are selectors, not permissions.",
@@ -1509,6 +1520,12 @@ export function toolUsageHints(args = {}) {
       "After yunti_new_page, use the returned browserSessionId for follow-up calls on the new tab.",
       "The controller heartbeat keeps metadata for tabs that still exist and removes routes for closed tabs.",
       "If a tool call fails due to parameters, inspect this hint output and the tool schema before retrying.",
+      "Unknown arguments are rejected. timeout_ms is not timeoutMs; the outer HTTP timeout and an action readiness timeout have different meanings.",
+      "Diagnostic network/console/CDP-buffer tools require browserSessionId, not tabId, targetId or pageHandleId. Verify effectiveRoute; clears require an explicit page or allSessions:true.",
+      "Independent tasks use independent tabs and explicit routes. Pass observationId with uid when coordinating page work, and close only tabs created by the current task.",
+      "For pagination, verify target page, loading completion, row count and data fingerprint before collecting; a dispatched click or fixed sleep does not prove advancement.",
+      "YUNTI_BROWSER_INSTANCE_OFFLINE and YUNTI_INVENTORY_STALE do not prove a closed tab. Follow recoveryAction without retrying the same stale request.",
+      "Transport completion is not action success. Inspect actionStatus, root ok and dataCompleteness; a failed network event is not a failed diagnostics query.",
       "Choose content-script actions, CDP, screenshots, network tools, or console tools according to which path can operate and verify the page most reliably; CDP is not a restricted fallback.",
       "Chrome may show a debugger banner while CDP is attached. Treat that as informational, not as a reason to avoid CDP or weaken the browser workflow.",
       "Use CDP proactively for cross-origin frames, shadow DOM, canvas, precise input, protocol-level navigation, browser targets, network control, emulation, tracing, and cases where DOM actions are unreliable.",

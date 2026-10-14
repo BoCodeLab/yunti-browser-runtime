@@ -1,4 +1,7 @@
 import http from "node:http"
+import { dispatchBridgeTool } from "./arguments.js"
+import { classifyToolFailure } from "./failure-contract.js"
+import { annotateActionStatus } from "./json-rpc.js"
 import { readFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -6,7 +9,6 @@ import {
   BridgeHub,
   CURRENT_EXTENSION_PROTOCOL_VERSION,
   DEFAULT_SESSION_TTL_MS,
-  DEFAULT_TOOL_TIMEOUT_MS,
   normalizeRouteUserId,
 } from "./bridge-hub.js"
 
@@ -394,28 +396,31 @@ export async function startBridgeServer({
         return
       }
 
-      if (req.method === "POST" && url.pathname === "/mcp/local-tool") {
+      if (req.method === "POST" && ["/mcp/request", "/mcp/local-tool"].includes(url.pathname)) {
         const body = await readJson(req)
-        const result = await hub.callBridgeLocalTool(String(body.tool || ""), body.arguments ?? {})
-        sendJson(req, res, 200, { ok: true, result }, { allowOrigins })
-        return
-      }
-
-      if (req.method === "POST" && url.pathname === "/mcp/request") {
-        const body = await readJson(req)
-        const result = await hub.callTool(
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some(key => !["tool", "arguments", "timeoutMs"].includes(key))) {
+          throw new Error("YUNTI_PARAMETER_INVALID: tool request body accepts only tool, arguments and timeoutMs")
+        }
+        const args = body.arguments ?? {}
+        const result = await dispatchBridgeTool(
+          hub,
           String(body.tool || ""),
-          body.arguments ?? {},
-          Number(body.timeoutMs || DEFAULT_TOOL_TIMEOUT_MS)
+          args && typeof args === "object" && !Array.isArray(args)
+            ? { ...args, userId: args.userId || _ROUTE_USER_ID, userName: args.userName || _ROUTE_USER_NAME }
+            : args,
+          body.timeoutMs === undefined ? undefined : Number(body.timeoutMs)
         )
-        sendJson(req, res, 200, { ok: true, result }, { allowOrigins })
+        sendJson(req, res, 200, { ok: true, result: annotateActionStatus(result) }, { allowOrigins })
         return
       }
 
       sendJson(req, res, 404, { error: "not found" }, { allowOrigins })
     } catch (error) {
-      sendJson(req, res, 500, {
+      const failure = classifyToolFailure(error)
+      sendJson(req, res, failure.code === "YUNTI_PARAMETER_INVALID" ? 400 : 500, {
+        ok: false,
         error: error instanceof Error ? error.message : String(error),
+        failure,
       }, { allowOrigins })
     }
   })

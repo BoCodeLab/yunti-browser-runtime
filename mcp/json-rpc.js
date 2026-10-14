@@ -6,7 +6,20 @@ export function jsonRpcErr(id, code, message) {
   return { jsonrpc: "2.0", id, error: { code, message } }
 }
 
+export function annotateActionStatus(value) {
+  if (value && typeof value === "object" && value.action) {
+    return {
+      ...value, transportStatus: "completed",
+      actionStatus: value.ok === false ? value.action === "wait_for" ? "condition_not_met" : "failed" : value.action === "wait_for" ? "condition_met" : "dispatched",
+      ...(value.ok === false && value.action !== "wait_for" ? { errorCategory: "application" } : {}),
+    }
+  }
+  return value
+}
+
 export function toolOk(value) {
+  const actionFailed = value?.ok === false && value.action && value.action !== "wait_for"
+  value = annotateActionStatus(value)
   if (value && typeof value === "object" && typeof value.dataUrl === "string") {
     const match = value.dataUrl.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i)
     if (match) {
@@ -21,6 +34,7 @@ export function toolOk(value) {
     }
   }
   return {
+    ...(actionFailed ? { isError: true } : {}),
     content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
     structuredContent: value,
   }
@@ -31,6 +45,8 @@ export function toolError(message, options = {}) {
   const payload = detail ? `${message}\n${detail}` : message
   const failure = {
     ok: false,
+    transportStatus: "completed",
+    errorCategory: "application",
     code: typeof options === "object" ? options.code || "YUNTI_TOOL_ERROR" : "YUNTI_TOOL_ERROR",
     message,
     retryable: typeof options === "object" ? Boolean(options.retryable) : false,
@@ -50,7 +66,7 @@ export function toolError(message, options = {}) {
   }
   return {
     isError: true,
-    content: [{ type: "text", text: payload }],
+    content: [{ type: "text", text: payload.startsWith(failure.code) ? payload : `${failure.code}: ${payload}` }],
     structuredContent: failure,
   }
 }

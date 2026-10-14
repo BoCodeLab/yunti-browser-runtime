@@ -2,6 +2,118 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { createToolDispatcher } from "../extension/tool-handlers.js"
 
+test("evaluate reports serialized completeness without returning broken JSON", async () => {
+  for (const value of [{ rows: "a".repeat(150) }, Array(20).fill({ name: "data" }), "a".repeat(150)]) {
+    const harness = createDispatcherHarness({ cdpResponses: [{ result: { type: typeof value, value } }] })
+    try {
+      await harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, {
+        id: "large", tool: "yunti_evaluate_script", arguments: { expression: "fixture", maxLength: 100 },
+      })
+      const result = harness.posted.at(-1).result
+      assert.equal(result.truncated, true)
+      assert.equal(result.dataCompleteness, "truncated")
+      assert.ok(result.totalChars > 100)
+      if (typeof value === "string") assert.equal(result.value.length, 100)
+      else assert.equal(result.value, null)
+      assert.ok(result.returnedChars <= 100)
+    } finally {
+      harness.restore()
+    }
+  }
+})
+
+test("evaluate respects zero and exact output limits", async () => {
+  for (const maxLength of [0, 4, 5]) {
+    const harness = createDispatcherHarness({ cdpResponses: [{ result: { type: "string", value: "hello" } }] })
+    try {
+      await harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, {
+        id: "bounded", tool: "yunti_evaluate_script", arguments: { expression: "fixture", maxLength },
+      })
+      const result = harness.posted.at(-1).result
+      assert.equal(result.value.length, maxLength)
+      assert.equal(result.truncated, maxLength < 5)
+    } finally {
+      harness.restore()
+    }
+  }
+})
+
+test("script failures retain the actual exception and source position", async () => {
+  const harness = createDispatcherHarness({ cdpResponses: [{ exceptionDetails: {
+    text: "Uncaught", lineNumber: 3, columnNumber: 7,
+    exception: { className: "ReferenceError", description: "ReferenceError: missing is not defined" },
+  } }] })
+  try {
+    await harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, {
+      id: "script-error", tool: "yunti_evaluate_script", arguments: { expression: "missing" },
+    })
+    const result = harness.posted.at(-1)
+    assert.match(result.error, /missing is not defined/)
+    assert.equal(result.failure.code, "SCRIPT_EXECUTION_FAILED")
+    assert.equal(result.failure.diagnostics.exceptionType, "ReferenceError")
+    assert.equal(result.failure.diagnostics.lineNumber, 3)
+  } finally {
+    harness.restore()
+  }
+})
+
+test("an abandoned operation does not publish a second late result", async () => {
+  let finish
+  const response = new Promise(resolve => { finish = resolve })
+  const harness = createDispatcherHarness({ cdpResponses: [response] })
+  try {
+    const controller = new AbortController()
+    const execution = harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, {
+      id: "late", tool: "yunti_evaluate_script", arguments: { expression: "fixture" }, signal: controller.signal,
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    controller.abort()
+    finish({ result: { type: "number", value: 1 } })
+    await execution
+    assert.equal(harness.posted.length, 0)
+  } finally { harness.restore() }
+})
+
+test("a mismatched observationId is rejected before a uid action", async () => {
+  const harness = createDispatcherHarness()
+  try {
+    const session = { browserSessionId: "page", tabId: 123 }
+    await harness.dispatcher.executeToolRequest(123, session, { id: "observe", tool: "yunti_observe_page", arguments: {} })
+    await harness.dispatcher.executeToolRequest(123, session, { id: "wrong", tool: "yunti_click", arguments: { uid: "yunti-1", observationId: "another-agent-observation" } })
+    assert.equal(harness.posted.at(-1).ok, false)
+    assert.equal(harness.posted.at(-1).failure.code, "YUNTI_OBSERVATION_STALE")
+    assert.equal(harness.sentMessages.length, 1)
+  } finally { harness.restore() }
+})
+
+test("unicode output limits do not split a surrogate pair", async () => {
+  const harness = createDispatcherHarness({ cdpResponses: [{ result: { type: "string", value: "🙂".repeat(100) } }] })
+  try {
+    await harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, { id: "unicode", tool: "yunti_evaluate_script", arguments: { expression: "fixture", maxLength: 99 } })
+    const result = harness.posted.at(-1).result
+    assert.equal(result.truncated, true)
+    assert.equal(result.returnedChars, 98)
+    assert.equal(result.totalChars, 200)
+    assert.equal(result.value, "🙂".repeat(49))
+  } finally { harness.restore() }
+})
+
+test("a non-awaited promise is marked pending and exception credentials are redacted", async () => {
+  const harness = createDispatcherHarness({ cdpResponses: [
+    { result: { type: "object", subtype: "promise" } },
+    { exceptionDetails: { text: "Uncaught", exception: { className: "Error", description: "Error: token=fixture-secret password: placeholder-value" } } },
+  ] })
+  try {
+    const session = { browserSessionId: "page", tabId: 123 }
+    await harness.dispatcher.executeToolRequest(123, session, { id: "promise", tool: "yunti_evaluate_script", arguments: { expression: "fixture" } })
+    assert.equal(harness.posted.at(-1).result.promisePending, true)
+    assert.equal(harness.posted.at(-1).result.dataCompleteness, "pending")
+    await harness.dispatcher.executeToolRequest(123, session, { id: "exception", tool: "yunti_evaluate_script", arguments: { expression: "fixture" } })
+    assert.doesNotMatch(harness.posted.at(-1).error, /fixture-secret|placeholder-value/)
+    assert.equal(harness.posted.at(-1).failure.resultUncertain, true)
+  } finally { harness.restore() }
+})
+
 function createDispatcherHarness(options = {}) {
 const posted = []
 const sentMessages = []
@@ -10,6 +122,7 @@ const cdpDispatches = []
 const ensureRegistrationCalls = []
 const cdpResponses = options.cdpResponses ? [...options.cdpResponses] : null
   const defaultContentToolResponses = {
+    __yunti_resolve_uid: () => ({ ok: true, x: 60, y: 40, tag: "input", type: "file" }),
     yunti_click: (message) => ({
       clicked: true,
       x: Number.isFinite(Number(message.arguments?.x)) ? Number(message.arguments.x) : undefined,
@@ -116,6 +229,9 @@ const cdpResponses = options.cdpResponses ? [...options.cdpResponses] : null
     cdp: {
       chromeDebuggerSendCommand: async (_target, method, params) => {
         cdpCommands.push({ method, params })
+        if (method === "DOM.resolveNode") return { object: { objectId: "fixture-node" } }
+        if (method === "Runtime.callFunctionOn") return { result: { value: { ok: true } } }
+        if (method === "Runtime.releaseObject") return {}
         if (cdpResponses) {
           return cdpResponses.shift() || {}
         }
@@ -158,6 +274,7 @@ test("AX snapshot uids resolve their live backend node before clicking", async (
     { nodes: [{ nodeId: "1", backendDOMNodeId: 7, role: { value: "button" }, name: { value: "Submit" } }] },
     {},
     { model: { content: [10, 20, 110, 20, 110, 60, 10, 60] } },
+    {}, {}, { model: { content: [10, 20, 110, 20, 110, 60, 10, 60] } },
   ] })
   try {
     const session = { browserSessionId: "tab-ax", tabId: 123, kind: "page" }
@@ -359,7 +476,7 @@ test("observe uid map feeds existing uid-based click path", async () => {
       harness.sentMessages.map((item) => item.message.tool),
       ["yunti_observe_page", "yunti_click"]
     )
-    assert.deepEqual(harness.sentMessages.at(-1).message.arguments, { uid: "yunti-1", x: 60, y: 40 })
+    assert.deepEqual(harness.sentMessages.at(-1).message.arguments, { uid: "yunti-1", uidSource: "observe", x: 60, y: 40 })
     assert.deepEqual(harness.cdpCommands, [])
     assert.equal(
       harness.sentMessages.filter((item) => item.message.tool === "yunti_observe_page").length,
@@ -1849,6 +1966,7 @@ test("uid select value path preserves compatibility fields with structured resul
     assert.deepEqual(harness.sentMessages.at(-1).message.arguments, {
       uid: "yunti-plan",
       value: "pro",
+      uidSource: "observe",
       x: 80,
       y: 42,
     })
@@ -1919,6 +2037,7 @@ test("uid select visible text path preserves compatibility fields with structure
     assert.deepEqual(harness.sentMessages.at(-1).message.arguments, {
       uid: "yunti-plan",
       text: "Enterprise",
+      uidSource: "observe",
       x: 80,
       y: 42,
     })
@@ -2242,7 +2361,9 @@ test("wait_for selector success returns structured result fields", async () => {
     })
 
     const result = harness.posted.at(-1).result
-    assert.equal(result.found, "selector")
+    // The content script reports the matched condition in `found`; the tool
+    // contract exposes a boolean and moves the condition kind to `condition`.
+    assert.equal(result.found, true)
     assert.equal(result.selector, "#ready")
     assert.equal(result.condition, "selector")
     assert.equal(result.browserSessionId, "tab-1")
@@ -3005,6 +3126,9 @@ test("take_snapshot resolves viewport rects so snapshot uids can drive actions",
       { result: { value: JSON.stringify({ x: 0, y: 120 }) } },
       { model: { border: [10, 240, 110, 240, 110, 280, 10, 280] } },
       { model: { border: [200, 240, 320, 240, 320, 272, 200, 272] } },
+      {},
+      { result: { value: JSON.stringify({ x: 0, y: 120 }) } },
+      { model: { border: [10, 240, 110, 240, 110, 280, 10, 280] } },
     ],
   })
   try {

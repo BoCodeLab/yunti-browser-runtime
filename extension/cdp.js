@@ -648,7 +648,7 @@ export function createCdpController({
     })
   }
 
-  function chromeDebuggerSendCommand(target, method, params) {
+  function chromeDebuggerSendCommand(target, method, params, options = {}) {
     return withCommandTimeout(
       new Promise((resolve, reject) => {
         chrome.debugger.sendCommand(target, method, params, (result) => {
@@ -658,14 +658,15 @@ export function createCdpController({
         })
       }),
       target,
-      method
+      method,
+      options
     )
   }
 
-  function withCommandTimeout(promise, target, method) {
+  function withCommandTimeout(promise, target, method, options = {}) {
     // Floor kept low so tests and heavily throttled environments can use short
     // budgets; the production default is 10s.
-    const timeoutMs = Math.max(250, Number(commandTimeoutMs) || DEFAULT_CDP_COMMAND_TIMEOUT_MS)
+    const timeoutMs = Math.max(250, Number(options.timeoutMs) || Number(commandTimeoutMs) || DEFAULT_CDP_COMMAND_TIMEOUT_MS)
     let timer = null
     return Promise.race([
       promise.then((value) => {
@@ -682,12 +683,17 @@ export function createCdpController({
             cdpAttachedTabs.delete(tabId)
             cdpEnabledDomains.delete(tabId)
           }
-          reject(
-            new Error(
-              `YUNTI_CDP_TIMEOUT ${method} did not answer within ${timeoutMs}ms on tab ${tabId || "unknown"}. ` +
-                `retryable=true retryBudget=1 recoveryAction=verify_page_state_then_retry`
-            )
+          const error = new Error(
+            `YUNTI_CDP_TIMEOUT ${method} did not answer within ${timeoutMs}ms on tab ${tabId || "unknown"}. ` +
+              `retryable=false retryBudget=0 recoveryAction=verify_state_before_retry`
           )
+          error.code = "YUNTI_CDP_TIMEOUT"
+          error.structuredFailure = {
+            code: error.code, retryable: false, retryBudget: 0, resultUncertain: true,
+            recoveryAction: "verify_state_before_retry",
+            diagnostics: { phase: "cdp", method, tabId, effectiveTimeoutMs: timeoutMs },
+          }
+          reject(error)
         }, timeoutMs)
       }),
     ])

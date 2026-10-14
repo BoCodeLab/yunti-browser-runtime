@@ -730,7 +730,8 @@ test("controller answers a queued same-tab request with YUNTI_TAB_BUSY", async (
     assert.ok(busy, "the queued request must fail fast instead of burning its whole budget")
     assert.equal(busy.body.ok, false)
     assert.match(String(busy.body.error || ""), /YUNTI_TAB_BUSY/)
-    assert.match(String(busy.body.error || ""), /retryable=true/)
+    assert.equal(busy.body.failure.retryable, true)
+    assert.equal(busy.body.failure.resultUncertain, false)
     assert.match(String(busy.body.error || ""), /yunti_click/)
     // It waits for the in-flight lane to release (the 400ms handler) but must
     // never reach the 5s request budget.
@@ -746,7 +747,7 @@ test("controller answers a queued same-tab request with YUNTI_TAB_BUSY", async (
   }
 })
 
-test("controller publishes YUNTI_TAB_BUSY as soon as a wedged lane releases", async () => {
+test("controller rejects a queued request before a wedged lane finishes", async () => {
   const started = []
   const mock = installSessionManagerChromeMock({
     pollEvents: [
@@ -790,12 +791,13 @@ test("controller publishes YUNTI_TAB_BUSY as soon as a wedged lane releases", as
 
     assert.ok(busy, "the queued request must fail fast")
     assert.match(String(busy.body.error || ""), /YUNTI_TAB_BUSY/)
-    assert.match(String(busy.body.error || ""), /retryable=true/)
+    assert.equal(busy.body.failure.retryable, true)
+    assert.equal(busy.body.failure.resultUncertain, false)
     assert.ok(
       elapsedMs >= 100 && elapsedMs <= 500,
       `busy answer must follow the 100ms queue budget closely, got ${elapsedMs}ms`
     )
-    const wedgedResult = bridgeResultFor(mock.requests, "wedged-first")
+    const wedgedResult = await waitFor(() => bridgeResultFor(mock.requests, "wedged-first"), 600)
     assert.equal(wedgedResult?.body.ok, false)
     assert.match(String(wedgedResult?.body.error || ""), /timed out inside the extension/)
     assert.deepEqual(started, ["wedged-first"])
@@ -899,7 +901,8 @@ test("CDP command timeout rejects with YUNTI_CDP_TIMEOUT and forces a re-attach"
       (error) => {
         assert.match(error.message, /YUNTI_CDP_TIMEOUT/)
         assert.match(error.message, /Page\.captureScreenshot/)
-        assert.match(error.message, /retryable=true/)
+        assert.equal(error.structuredFailure.retryable, false)
+        assert.equal(error.structuredFailure.resultUncertain, true)
         assert.match(error.message, /did not answer within 250ms/)
         return true
       }

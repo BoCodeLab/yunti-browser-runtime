@@ -284,6 +284,19 @@ test("controller polling continues while a browser tool is still executing", asy
   }
 })
 
+test("a declared wait receives its budget even when the generic watchdog is shorter", async () => {
+  const mock = installChromeMock({ pollEvents: [{ type: "tool_request", id: "long-wait", tool: "yunti_wait_for", arguments: { text: "ready", timeoutMs: 100 }, route: { tabId: 1 }, deadlineAt: Date.now() + 2000 }] })
+  try {
+    const manager = createSessionManager({ controllerToolWatchdogMs: 5, controllerToolTimeoutMs: 2000 })
+    let completed = false
+    manager.setToolRequestHandler(async () => { await new Promise(resolve => setTimeout(resolve, 35)); completed = true })
+    await manager.registerBrowserController("declared_wait")
+    await new Promise(resolve => setTimeout(resolve, 65))
+    assert.equal(completed, true)
+    assert.equal(mock.requests.filter(r => r.url.endsWith("/extension/result")).length, 0)
+  } finally { mock.restore() }
+})
+
 test("controller tool queue serializes per page instead of blocking other tabs", async () => {
   const started = []
   const finished = []

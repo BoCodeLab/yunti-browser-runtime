@@ -55,6 +55,11 @@ export function createToolDispatcher({
       tabId = route.tabId
       session = route.session
       assertConcretePageRoute(tabId, session, event)
+      if (event.arguments?.uid && event.arguments?.observationId && event.arguments.observationId !== pageUidStore.get(session.browserSessionId)?.observationId) {
+        const error = new Error("YUNTI_OBSERVATION_STALE: observationId does not match the current page observation. Observe the explicitly selected page again.")
+        error.code = "YUNTI_OBSERVATION_STALE"
+        throw error
+      }
     } catch (err) {
       ok = false
       error = err instanceof Error ? err.message : String(err)
@@ -254,6 +259,7 @@ export function createToolDispatcher({
     if (ok && CAPTURE_METADATA_TOOLS.has(event.tool)) {
       result = attachCaptureMetadata(result, event)
     }
+    if (event.signal?.aborted) return
     await postBridge("/extension/result", {
       browserSessionId: transportSession.browserSessionId,
       requestId: event.id,
@@ -276,7 +282,9 @@ export function createToolDispatcher({
       code: explicitCode || "EXTENSION_TOOL_FAILED",
       action: tool || undefined,
       message: text,
+      ...(error?.diagnostics ? { diagnostics: error.diagnostics } : {}),
     }
+    if (error?.structuredFailure?.code) return { ...base, ...error.structuredFailure }
     if (/could not resolve an active http\/https browser tab/i.test(text)) {
       return {
         ...base,
@@ -799,8 +807,8 @@ export function createToolDispatcher({
     const expression = String(args.expression || "").trim()
     if (!expression) throw new Error("expression is required")
     const awaitPromise = Boolean(args.awaitPromise)
-    const maxLength = Number.isFinite(Number(args.maxLength)) && Number(args.maxLength) > 0
-      ? Math.min(Number(args.maxLength), 100000)
+    const maxLength = Number.isFinite(Number(args.maxLength)) && Number(args.maxLength) >= 0
+      ? Math.min(Math.floor(Number(args.maxLength)), 100000)
       : 10000
   
     await ensureCdpAttached(tabId, "1.3")
@@ -808,42 +816,86 @@ export function createToolDispatcher({
     const result = await chromeDebuggerSendCommand(
       { tabId },
       "Runtime.evaluate",
-      { expression, returnByValue: true, awaitPromise }
+      { expression, returnByValue: true, awaitPromise, ...(args.timeoutMs !== undefined ? { timeout: args.timeoutMs } : {}) },
+      args.timeoutMs !== undefined ? { timeoutMs: Number(args.timeoutMs) + 1000 } : undefined
     )
   
     if (result?.exceptionDetails) {
-      const text = result.exceptionDetails.text || result.exceptionDetails.exception?.description || "Script error"
-      throw new Error(text)
+      const detail = result.exceptionDetails
+      const rawDescription = String(detail.exception?.description || detail.text || "Script error")
+      const description = rawDescription
+        .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 [REDACTED]")
+        .replace(/\b((?:set-)?cookie|authorization)\s*[:=][^\r\n]*/gi, "$1: [REDACTED]")
+        .replace(/\b(password|passwd|access[_-]?token|refresh[_-]?token|token|secret|session[_-]?id|api[-_]?key)(["']?\s*[:=]\s*["']?)[^\s"';&]+/gi, "$1$2[REDACTED]")
+        .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[REDACTED]")
+        .slice(0, 4000)
+      const error = new Error(description)
+      error.code = "SCRIPT_EXECUTION_FAILED"
+      error.diagnostics = {
+        exceptionType: detail.exception?.className || "Error",
+        description: error.message,
+        lineNumber: detail.lineNumber,
+        columnNumber: detail.columnNumber,
+        truncated: rawDescription.length > 4000,
+      }
+      error.structuredFailure = {
+        code: error.code, retryable: false, retryBudget: 0,
+        resultUncertain: detail.exception?.className !== "SyntaxError",
+        recoveryAction: "fix_script_and_verify_state_before_retry",
+        diagnostics: error.diagnostics,
+      }
+      throw error
     }
   
     const value = result?.result?.value
     const type = result?.result?.type || typeof value
     const serialized = serializeResult(value, maxLength)
+    const promisePending = !awaitPromise && result?.result?.subtype === "promise"
   
     return {
-      value: serialized,
+      ...serialized,
       type,
-      truncated: typeof value === "string" && value.length > maxLength,
+      ...(promisePending ? {
+        promisePending: true,
+        dataCompleteness: "pending",
+        nextStepHint: "The expression returned a Promise. Use awaitPromise:true to read its resolved value; this result is not the completed async operation.",
+      } : {}),
       browserSessionId: session.browserSessionId,
     }
   }
   
   function serializeResult(value, maxLength) {
-    if (value === undefined || value === null) return value
-    if (typeof value === "string") {
-      return value.length > maxLength ? value.slice(0, maxLength) + "..." : value
-    }
-    if (typeof value === "number" || typeof value === "boolean") return value
+    const isText = typeof value === "string"
+    let text
     try {
-      const json = JSON.stringify(value)
-      return json.length > maxLength ? json.slice(0, maxLength) + "..." : json
+      text = value === undefined ? "" : isText ? value : JSON.stringify(value)
     } catch {
-      return String(value).slice(0, maxLength)
+      text = String(value)
+    }
+    const truncated = text.length > maxLength
+    // A JSON prefix is not a JSON value. Keep oversized structured values
+    // absent instead of advertising a broken prefix as complete data.
+    const returned = truncated
+      ? isText ? text.slice(0, maxLength).replace(/[\uD800-\uDBFF]$/, "") : null
+      : value == null || typeof value === "number" || typeof value === "boolean" ? value : text
+    return {
+      value: returned,
+      truncated,
+      totalChars: text.length,
+      returnedChars: typeof returned === "string" ? returned.length : 0,
+      maxLength,
+      encoding: isText ? "text" : "json",
+      dataCompleteness: truncated ? "truncated" : "complete",
+      ...(truncated ? {
+        code: "RESULT_TRUNCATED",
+        nextStepHint: "The result exceeds maxLength. Return a bounded slice or select fewer fields; a missing structured value is not an empty result.",
+      } : {}),
     }
   }
   
   // Latest page uid state from yunti_observe_page or yunti_take_snapshot.
   const pageUidStore = new Map()
+  let snapshotGeneration = 0
   
   async function takeSnapshot(tabId, session, args = {}) {
     const maxElements = Number.isFinite(Number(args.maxElements))
@@ -870,7 +922,9 @@ export function createToolDispatcher({
       elements = await domFallbackSnapshot(tabId, maxElements)
     }
   
-    storePageUidMap(session, "snapshot", elements)
+    const snapshotId = `snap-${Date.now().toString(36)}-${++snapshotGeneration}`
+    elements = elements.map((element, index) => ({ ...element, uid: `yunti-${snapshotId}-${index + 1}` }))
+    storePageUidMap(session, "snapshot", elements, { observationId: snapshotId })
   
     return {
       browserSessionId: session.browserSessionId,
@@ -878,7 +932,8 @@ export function createToolDispatcher({
       title: session.title || "",
       elements,
       elementCount: elements.length,
-      snapshotId: `snap-${Date.now()}`,
+      snapshotId,
+      observationId: snapshotId,
     }
   }
 
@@ -1135,10 +1190,10 @@ export function createToolDispatcher({
       const result = await chrome.tabs.sendMessage(tabId, {
         type: "yunti_execute_tool",
         tool: "yunti_click",
-        arguments: { ...args, x: point.x, y: point.y },
+        arguments: uidTargetArguments(session, args, point),
       })
       if (!result || typeof result !== "object" || result.clicked !== true) {
-        return buildUidPointFailureResult(session, uid, "click", result?.error || "Uid click failed")
+        return buildUidPointFailureResult(session, uid, "click", result?.error || "Uid click failed", result)
       }
       const roundedX = Math.round(point.x)
       const roundedY = Math.round(point.y)
@@ -1224,10 +1279,10 @@ export function createToolDispatcher({
       const result = await chrome.tabs.sendMessage(tabId, {
         type: "yunti_execute_tool",
         tool: "yunti_hover",
-        arguments: { ...args, x: point.x, y: point.y },
+        arguments: uidTargetArguments(session, args, point),
       })
       if (!result || typeof result !== "object" || result.hovered !== true) {
-        return buildUidPointFailureResult(session, uid, "hover", result?.error || "Uid hover failed")
+        return buildUidPointFailureResult(session, uid, "hover", result?.error || "Uid hover failed", result)
       }
       const roundedX = Math.round(point.x)
       const roundedY = Math.round(point.y)
@@ -1321,7 +1376,7 @@ export function createToolDispatcher({
         const result = await chrome.tabs.sendMessage(tabId, {
           type: "yunti_execute_tool",
           tool: "yunti_fill",
-          arguments: { ...args, x: point.x, y: point.y },
+          arguments: uidTargetArguments(session, args, point),
         })
         if (!result || typeof result !== "object" || result.filled !== true) {
           return buildUidFillFailureResult(session, uid, result)
@@ -1522,8 +1577,7 @@ export function createToolDispatcher({
           error: error?.message || "Uid scroll failed",
         })
       }
-      const { x, y } = point
-      scrollArgs = { ...args, x, y }
+      scrollArgs = uidTargetArguments(session, args, point)
     }
     const result = await chrome.tabs.sendMessage(tabId, {
       type: "yunti_execute_tool",
@@ -1769,7 +1823,7 @@ export function createToolDispatcher({
       const selectResult = await chrome.tabs.sendMessage(tabId, {
         type: "yunti_execute_tool",
         tool: "yunti_select",
-        arguments: { ...args, x: point.x, y: point.y },
+        arguments: uidTargetArguments(session, args, point),
       })
       if (!selectResult?.selected) {
         return buildUidSelectFailureResult(session, uid, matchMode, targetOption, selectResult)
@@ -2084,9 +2138,32 @@ export function createToolDispatcher({
     return { x: Number(value.x), y: Number(value.y) }
   }
   
+  function uidTargetArguments(session, args, point) {
+    const { selector: _selector, ...targetArgs } = args
+    return {
+      ...targetArgs,
+      uidSource: pageUidStore.get(session.browserSessionId)?.source,
+      x: point.x, y: point.y,
+    }
+  }
+
+  async function liveDomUidPoint(tabId, session, uid) {
+    const result = await chrome.tabs.sendMessage(tabId, {
+      type: "yunti_execute_tool", tool: "__yunti_resolve_uid",
+      arguments: { uid, uidSource: pageUidStore.get(session.browserSessionId)?.source },
+    })
+    if (!result?.ok) {
+      const error = new Error(result?.error || `Cannot resolve live uid ${uid}`)
+      error.code = result?.code || "UID_NOT_FOUND"
+      throw error
+    }
+    return result
+  }
+
   async function resolveUidCenter(tabId, session, uid) {
     const point = resolveObservedUidCenter(session, uid)
     if (!point.ok) throw new Error(point.error)
+    if (point.domUid) return liveDomUidPoint(tabId, session, uid)
     if (point.x !== undefined && point.y !== undefined) return { x: point.x, y: point.y }
 
     const node = point.element
@@ -2100,6 +2177,22 @@ export function createToolDispatcher({
       ? { backendNodeId: node.backendNodeId }
       : { nodeId: node.nodeId }
     await chromeDebuggerSendCommand({ tabId }, "DOM.scrollIntoViewIfNeeded", nodeRef).catch(() => {})
+    const resolved = await chromeDebuggerSendCommand({ tabId }, "DOM.resolveNode", nodeRef)
+    const objectId = resolved?.object?.objectId
+    if (!objectId) throw new Error(`Cannot resolve the live DOM node for uid ${uid}`)
+    const readiness = await chromeDebuggerSendCommand({ tabId }, "Runtime.callFunctionOn", {
+      objectId, returnByValue: true,
+      functionDeclaration: `function () {
+        if (!this.isConnected) return { ok: false, error: 'Observed node is disconnected' };
+        if (this.disabled || this.getAttribute('aria-disabled') === 'true') return { ok: false, error: 'Observed node is disabled' };
+        const rect = this.getBoundingClientRect();
+        const root = this.getRootNode();
+        const hit = (root.elementFromPoint ? root : this.ownerDocument).elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return { ok: rect.width > 0 && rect.height > 0 && !!hit && (hit === this || this.contains(hit)), error: 'Observed node is hidden or obscured' };
+      }`,
+    }).finally(() => chromeDebuggerSendCommand({ tabId }, "Runtime.releaseObject", { objectId }).catch(() => {}))
+    if (!readiness?.result?.value?.ok) throw new Error(readiness?.result?.value?.error || `Cannot verify node identity for uid ${uid}`)
+    const offsets = await snapshotScrollOffsets(tabId)
     const box = await chromeDebuggerSendCommand({ tabId }, "DOM.getBoxModel", nodeRef)
     const quad = box?.model?.border || box?.model?.content || box?.model?.padding
     if (!Array.isArray(quad) || quad.length < 8) {
@@ -2111,8 +2204,8 @@ export function createToolDispatcher({
       throw new Error(`CDP returned invalid coordinates for uid ${uid}`)
     }
     return {
-      x: (Math.min(...xs) + Math.max(...xs)) / 2,
-      y: (Math.min(...ys) + Math.max(...ys)) / 2,
+      x: (Math.min(...xs) + Math.max(...xs)) / 2 - offsets.x,
+      y: (Math.min(...ys) + Math.max(...ys)) / 2 - offsets.y,
     }
   }
 
@@ -2126,6 +2219,11 @@ export function createToolDispatcher({
       }
     }
     const el = uidMap[uid]
+    // A snapshot rectangle is an observation, not a live node position.
+    if (el.source === "snapshot") return el.backendNodeId
+      ? { ok: true, element: el }
+      : { ok: false, error: `Cannot resolve a safe node identity for uid ${uid}. Run yunti_observe_page for DOM-bound uids.` }
+    if (!el.rect && ["observe", "find"].includes(el.source)) return { ok: true, domUid: uid }
     if (el.rect && el.rect.width > 0 && el.rect.height > 0) {
       return {
         ok: true,
@@ -2142,8 +2240,8 @@ export function createToolDispatcher({
     }
   }
 
-  function buildUidPointFailureResult(session, uid, action, error) {
-    const code = /not found|latest page uid map/i.test(String(error || "")) ? "UID_NOT_FOUND" : "UID_COORDINATES_UNAVAILABLE"
+  function buildUidPointFailureResult(session, uid, action, error, diagnostics = {}) {
+    const code = diagnostics.code || (/not found|latest page uid map/i.test(String(error || "")) ? "UID_NOT_FOUND" : "UID_COORDINATES_UNAVAILABLE")
     const resultFieldByAction = {
       click: "clicked",
       hover: "hovered",
@@ -2421,9 +2519,12 @@ export function createToolDispatcher({
       : match.found === "selector" || match.found === "text"
         ? match.found
         : undefined
+    // Spread the raw match first: the content-script observer reports the matched
+    // condition in `found` ("selector" / "text"), and spreading it after the
+    // literal would overwrite the boolean this tool contract promises.
     const result = {
-      found: true,
       ...match,
+      found: true,
       waitedMs,
       browserSessionId: session.browserSessionId,
       action: "wait_for",
@@ -2749,9 +2850,16 @@ export function createToolDispatcher({
   
     let backendNodeId = null
     if (uid) {
-      const { x, y } = await resolveUidCenter(tabId, session, uid)
-      const nodeResult = await chromeDebuggerSendCommand({ tabId }, "DOM.getNodeForLocation", { x: Math.round(x), y: Math.round(y) })
-      backendNodeId = nodeResult?.backendNodeId
+      const observed = pageUidStore.get(session.browserSessionId)?.uidMap?.[uid]
+      if (!observed) throw new Error("uid not found in the latest page uid map; observe before uploading")
+      if (observed.source === "snapshot" && observed.backendNodeId) {
+        backendNodeId = observed.backendNodeId
+      } else {
+        const point = await liveDomUidPoint(tabId, session, uid)
+        if (point.tag !== "input" || point.type !== "file") throw new Error("Observed uid is not a file input")
+        const nodeResult = await chromeDebuggerSendCommand({ tabId }, "DOM.getNodeForLocation", { x: Math.round(point.x), y: Math.round(point.y) })
+        backendNodeId = nodeResult?.backendNodeId
+      }
     } else if (selector) {
       const docResult = await chromeDebuggerSendCommand({ tabId }, "DOM.getDocument", {})
       const rootNodeId = docResult?.root?.nodeId
@@ -2831,7 +2939,7 @@ export function createToolDispatcher({
     const result = await chrome.tabs.sendMessage(tabId, {
       type: "yunti_execute_tool",
       tool: "yunti_type_text",
-      arguments: { ...args, x: point.x, y: point.y },
+      arguments: uidTargetArguments(session, args, point),
     })
     if (!result || typeof result !== "object" || result.typed !== true) return result
   
@@ -2896,7 +3004,7 @@ export function createToolDispatcher({
     const result = await chrome.tabs.sendMessage(tabId, {
       type: "yunti_execute_tool",
       tool: "yunti_press_key",
-      arguments: { ...args, x: point.x, y: point.y },
+      arguments: uidTargetArguments(session, args, point),
     })
     if (!result || typeof result !== "object" || result.pressed !== true) return result
   

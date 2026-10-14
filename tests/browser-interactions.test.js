@@ -7,6 +7,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { handleJsonRpc, startBridgeServer } from "../mcp/server.js"
+import { copyIsolatedExtension } from "./helpers/isolated-extension.js"
 
 // Interaction-level browser tests. The unit suites exercise the dispatcher with
 // a fake chrome API, and the e2e smoke test proves the whole chain once; this
@@ -59,13 +60,13 @@ async function loadPlaywright() {
   throw new Error("YUNTI_E2E=1 requires playwright or playwright-core")
 }
 
-function launchOptions(executablePath = "") {
+function launchOptions(executablePath = "", runtimeExtensionDir = extensionDir) {
   return {
     headless: process.env.YUNTI_E2E_HEADLESS === "1",
     ...(executablePath ? { executablePath } : {}),
     args: [
-      `--disable-extensions-except=${extensionDir}`,
-      `--load-extension=${extensionDir}`,
+      `--disable-extensions-except=${runtimeExtensionDir}`,
+      `--load-extension=${runtimeExtensionDir}`,
     ],
   }
 }
@@ -127,15 +128,16 @@ test("browser interaction semantics", { skip: runE2e ? false : "set YUNTI_E2E=1 
   const bridge = await startBridgeServer({ host: "127.0.0.1", port: 0, sessionTtlMs: 120_000 })
   const bridgeUrl = `http://127.0.0.1:${bridge.server.address().port}`
   const userDataDir = await mkdtemp(join(tmpdir(), "yunti-interaction-profile-"))
+  const runtimeExtensionDir = await copyIsolatedExtension(extensionDir, join(userDataDir, "fixture-extension"), bridgeUrl)
   let context = null
 
-  const callTool = async (name, args) => {
+  const callTool = async (name, args, allowFailure = false) => {
     const response = await handleJsonRpc(
       { jsonrpc: "2.0", id: Math.floor(Math.random() * 1_000_000), method: "tools/call", params: { name, arguments: args } },
       bridge
     )
     const text = response?.result?.content?.[0]?.text || ""
-    assert.equal(response?.result?.isError, undefined, `${name} failed: ${text}`)
+    if (!allowFailure) assert.notEqual(response?.result?.isError, true, `${name} failed: ${text}`)
     return response.result.structuredContent ?? JSON.parse(text)
   }
 
@@ -148,7 +150,7 @@ test("browser interaction semantics", { skip: runE2e ? false : "set YUNTI_E2E=1 
   // one observation, so reusing one after another observe is a stale-uid error
   // by design.
   const freshUid = async (session, pick) => {
-    const observation = await callTool("yunti_observe_page", { browserSessionId: session, mode: "balanced" })
+    const observation = await callTool("yunti_observe_page", { browserSessionId: session, mode: "viewport" })
     const match = elementsOf(observation).find(pick)
     return match?.uid || ""
   }
@@ -156,7 +158,7 @@ test("browser interaction semantics", { skip: runE2e ? false : "set YUNTI_E2E=1 
   try {
     const executablePath = resolveChromiumExecutable(playwright)
     t.diagnostic(`chromium executable: ${executablePath || "(playwright default)"}`)
-    context = await playwright.chromium.launchPersistentContext(userDataDir, launchOptions(executablePath))
+    context = await playwright.chromium.launchPersistentContext(userDataDir, launchOptions(executablePath, runtimeExtensionDir))
     const worker = await getExtensionWorker(context)
     await worker.evaluate(
       ({ bridgeUrl: runtimeBridgeUrl }) =>
@@ -203,7 +205,7 @@ test("browser interaction semantics", { skip: runE2e ? false : "set YUNTI_E2E=1 
     })
 
     await t.test("scroll moves the page and reports the no-movement edge", async () => {
-      await callTool("yunti_scroll", { browserSessionId: session, direction: "down", amount: 600 })
+      await callTool("yunti_scroll", { browserSessionId: session, deltaY: 600 })
       const scrolled = Number(await evaluate(session, "window.scrollY"))
       assert.ok(scrolled > 0, `expected the page to scroll, got scrollY=${scrolled}`)
 
@@ -211,7 +213,7 @@ test("browser interaction semantics", { skip: runE2e ? false : "set YUNTI_E2E=1 
       // structured diagnostic instead of silently doing nothing.
       let edge = null
       for (let i = 0; i < 12; i += 1) {
-        edge = await callTool("yunti_scroll", { browserSessionId: session, direction: "down", amount: 800 })
+        edge = await callTool("yunti_scroll", { browserSessionId: session, deltaY: 800 }, true)
       }
       assert.equal(edge.ok, false, "scrolling past the bottom must not report success")
       assert.equal(edge.code, "NO_SCROLL_MOVEMENT")
@@ -219,6 +221,27 @@ test("browser interaction semantics", { skip: runE2e ? false : "set YUNTI_E2E=1 
         edge.recoveryHint || edge.recoverable || edge.nextStepHint,
         "the no-movement answer must stay actionable"
       )
+    })
+
+    await t.test("evaluate declares incomplete data, async completion and actual exceptions", async () => {
+      const large = await callTool("yunti_evaluate_script", { browserSessionId: session, expression: "({rows:'a'.repeat(150)})", maxLength: 100 })
+      assert.equal(large.value, null)
+      assert.equal(large.truncated, true)
+      assert.ok(large.totalChars > 100)
+      const asyncResult = await callTool("yunti_evaluate_script", { browserSessionId: session, expression: "new Promise(resolve => setTimeout(() => resolve('ready'), 50))", awaitPromise: true, timeoutMs: 500 })
+      assert.equal(asyncResult.value, "ready")
+      const error = await callTool("yunti_evaluate_script", { browserSessionId: session, expression: "missingFixtureVariable" }, true)
+      assert.equal(error.code, "SCRIPT_EXECUTION_FAILED")
+      assert.equal(error.diagnostics.exceptionType, "ReferenceError")
+    })
+
+    await t.test("a legal long wait is not cut off by the generic twelve-second watchdog", async () => {
+      await evaluate(session, "setTimeout(() => { document.body.dataset.longWaitReady = 'true' }, 13000); 'scheduled'")
+      const startedAt = Date.now()
+      const result = await callTool("yunti_wait_for", { browserSessionId: session, selector: "body[data-long-wait-ready='true']", timeoutMs: 20000 })
+      assert.equal(result.found, true)
+      assert.equal(result.actionStatus, "condition_met")
+      assert.ok(Date.now() - startedAt >= 12000)
     })
 
     await t.test("a native dialog does not wedge the tab", async () => {
@@ -232,7 +255,7 @@ test("browser interaction semantics", { skip: runE2e ? false : "set YUNTI_E2E=1 
       assert.ok(dialogUid, "fixture must expose the dialog trigger")
 
       const startedAt = Date.now()
-      const result = await callTool("yunti_click", { browserSessionId: session, uid: dialogUid })
+      const result = await callTool("yunti_click", { browserSessionId: session, uid: dialogUid }, true)
       const elapsedMs = Date.now() - startedAt
       assert.ok(
         elapsedMs < 20_000,

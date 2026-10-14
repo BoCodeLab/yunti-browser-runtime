@@ -325,7 +325,32 @@ function markExtensionContextInvalidated() {
 }
 
 async function executeTool(tool, args) {
+  if (args.uid && ["observe", "find", "snapshot"].includes(args.uidSource)) {
+    const element = args.uidSource === "snapshot"
+      ? resolveElementFromViewportPoint(args.x, args.y)
+      : globalScope.YuntiBrowserRuntimeObserver?.resolveUid(args.uid)
+    const action = tool.replace(/^yunti_/, "")
+    if (!element) return buildActionabilityFailureResult(undefined, action, {
+      code: "UID_NOT_FOUND", error: "Observed uid not found in the current node map; the original node is disconnected. Observe again before acting.", retryable: false,
+    })
+    element.scrollIntoView({ block: "center", inline: "center" })
+    const readiness = evaluateActionability(element, args.uid, {
+      requireEnabled: !["hover", "scroll"].includes(action),
+      requireEditable: ["fill", "type_text"].includes(action),
+      requireReceivesEvents: action !== "scroll",
+      ...(action === "select" ? { requireTag: "select" } : {}),
+    })
+    if (!readiness.ok) return buildActionabilityFailureResult(undefined, action, readiness)
+    // Keep the node in this synchronous dispatch turn. Coordinates and a
+    // caller-supplied selector must not rebind an observed identity.
+    const point = viewportCenter(element)
+    args = { ...args, selector: undefined, x: point.x, y: point.y, _uidElement: element }
+  }
   switch (tool) {
+    case "__yunti_resolve_uid":
+      return args._uidElement
+        ? { ok: true, ...viewportCenter(args._uidElement), tag: args._uidElement.tagName.toLowerCase(), type: args._uidElement.type }
+        : { ok: false, code: "UID_NOT_FOUND", error: "Observed node identity is unavailable" }
     case "yunti_observe_page":
       return observePage(args)
     case "yunti_find_elements":
@@ -422,10 +447,10 @@ async function getPageSnapshot(args = {}) {
       .filter(isVisible)
       .slice(0, 80)
       .map(describeClickable)
-    snapshot.tables = [...document.querySelectorAll("table")]
-      .filter(isVisible)
-      .slice(0, 20)
-      .map(describeTable)
+    const tables = [...document.querySelectorAll("table")].filter(isVisible)
+    snapshot.tables = tables.slice(0, 20).map(describeTable)
+    snapshot.tableCount = tables.length
+    snapshot.tablesTruncated = tables.length > snapshot.tables.length
   }
   return snapshot
 }
@@ -555,7 +580,7 @@ async function clickElement(args) {
 function clickAt(args) {
   const x = clamp(Number(args.x), 0, Math.max(0, window.innerWidth - 1))
   const y = clamp(Number(args.y), 0, Math.max(0, window.innerHeight - 1))
-  const element = resolveElementFromViewportPoint(x, y)
+  const element = args._uidElement || resolveElementFromViewportPoint(x, y)
   if (!element) throw new Error(`No element found at viewport coordinate ${x},${y}`)
   focusElement(element)
   dispatchPointerMouseSequence(element, x, y)
@@ -768,10 +793,10 @@ function scrollPage(args) {
   const hasCoordinateTarget = Number.isFinite(Number(args.x)) && Number.isFinite(Number(args.y))
   const coordinateX = hasCoordinateTarget ? clamp(Number(args.x), 0, Math.max(0, window.innerWidth - 1)) : undefined
   const coordinateY = hasCoordinateTarget ? clamp(Number(args.y), 0, Math.max(0, window.innerHeight - 1)) : undefined
-  const coordinateTarget =
+  const coordinateTarget = args._uidElement || (
     hasCoordinateTarget
       ? resolveElementFromViewportPoint(coordinateX, coordinateY)
-      : null
+      : null)
   const scrollableAncestor = findScrollableAncestor(coordinateTarget)
   const target = scrollableAncestor || document.scrollingElement || document.documentElement
   const before = getScrollPosition(target)
@@ -906,10 +931,11 @@ function evaluateActionability(element, selector, requirements = {}) {
   }
 
   if (requirements.requireReceivesEvents) {
-    const centerX = clamp(rect.left + rect.width / 2, 0, Math.max(0, window.innerWidth - 1))
-    const centerY = clamp(rect.top + rect.height / 2, 0, Math.max(0, window.innerHeight - 1))
+    const point = viewportCenter(element)
+    const centerX = point.x
+    const centerY = point.y
     const hit = resolveElementFromViewportPoint(centerX, centerY)
-    if (hit && hit !== element && !element.contains?.(hit)) {
+    if (!hit || (hit !== element && !element.contains?.(hit))) {
       return {
         ok: false,
         code: "TARGET_OBSCURED",
@@ -954,6 +980,21 @@ function evaluateEditability(element) {
     error: "Target element is not editable",
     retryable: false,
   }
+}
+
+function viewportCenter(element) {
+  const rect = element.getBoundingClientRect()
+  let x = rect.left + rect.width / 2, y = rect.top + rect.height / 2
+  let owner = element.ownerDocument
+  while (owner && owner !== document) {
+    const frame = owner.defaultView?.frameElement
+    if (!frame) break
+    const frameRect = frame.getBoundingClientRect()
+    x += frameRect.left + frame.clientLeft
+    y += frameRect.top + frame.clientTop
+    owner = frame.ownerDocument
+  }
+  return { x, y }
 }
 
 function buildActionabilitySummary(result = {}) {
@@ -1285,11 +1326,19 @@ function describeInput(element) {
 }
 
 function describeTable(table) {
-  const headers = [...table.querySelectorAll("th")].slice(0, 30).map((th) => compactText(th.innerText))
-  const rows = [...table.querySelectorAll("tr")]
-    .slice(0, 5)
+  const allHeaders = [...table.querySelectorAll("th")]
+  const allRows = [...table.querySelectorAll("tr")]
+  const headers = allHeaders.slice(0, 30).map((th) => compactText(th.innerText))
+  const rows = allRows.slice(0, 5)
     .map((tr) => [...tr.children].slice(0, 10).map((td) => compactText(td.innerText)))
-  return { selector: cssPath(table), headers, rows }
+  const totalCols = Math.max(0, ...allRows.map(row => row.children.length))
+  const textTruncated = allRows.slice(0, 5).some(row => [...row.children].slice(0, 10).some(cell => String(cell.innerText || "").replace(/\s+/g, " ").trim().length > 160))
+  return {
+    selector: cssPath(table), headers, rows, isPreview: true, scope: "rendered-dom",
+    totalRows: allRows.length, returnedRows: rows.length, rowCountIncludesHeader: true,
+    totalCols, returnedCols: Math.max(0, ...rows.map(row => row.length)), textTruncated,
+    truncated: allRows.length > rows.length || totalCols > 10 || allHeaders.length > headers.length || textTruncated,
+  }
 }
 
 function describeElement(element) {

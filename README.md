@@ -11,7 +11,7 @@
 [![MCP](https://img.shields.io/badge/MCP-52_tools-111111)](docs/TOOL_GUIDE.md)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
-[快速开始](#快速开始) · [核心能力](#核心能力) · [工作原理](#工作原理) · [交给-agent-安装](#交给-agent-安装) · [文档](#文档导航)
+[首次安装](#快速开始首次安装) · [更新](#更新已安装的版本) · [核心能力](#核心能力) · [工作原理](#工作原理) · [交给-agent-安装](#交给-agent-安装) · [文档](#文档导航)
 
 </div>
 
@@ -63,9 +63,9 @@ benchmark 通过 `38/38` 场景、`114` 次尝试和 `397` 次 MCP 调用；Edge
 
 [查看耐久测试设计与完整验收标准](docs/SOAK_TEST.md)
 
-## 快速开始
+## 快速开始（首次安装）
 
-### 1. 安装 Runtime
+### 1. 获取源码
 
 克隆仓库到固定目录后直接使用，不需要 npm 账号，浏览器扩展目录就在仓库内。要求
 Node.js 22 或更高版本：
@@ -83,7 +83,8 @@ npm install
 没有安装 git 时，可以从 [Releases](https://github.com/BoCodeLab/yunti-browser-runtime/releases)
 页下载 `Source code (zip)` 解压，内容与克隆完全一致。
 
-请把仓库放在一个固定位置（例如 `D:\tools\yunti-browser-runtime`）。下一步生成的
+请把仓库放在一个固定位置（例如 Windows 的 `D:\tools\yunti-browser-runtime`，或
+macOS / Linux 的 `~/tools/yunti-browser-runtime`），不要放进临时目录。下一步生成的
 MCP 配置会写入该目录的绝对路径，目录被移动或删除后需要重新生成配置。
 
 `npm install` 这一步是可选的：运行时（MCP server、本地 Bridge、CLI、浏览器扩展）
@@ -117,8 +118,7 @@ npm run install-skill -- --harness codex
 
 ### 3. 加载浏览器扩展
 
-获取扩展目录：就是仓库内的 `extension` 目录（例如
-`D:\tools\yunti-browser-runtime\extension`）。
+获取扩展目录：就是仓库内的 `extension` 子目录，即 `<你的运行时目录>/extension`。
 
 然后完成一次浏览器侧加载：
 
@@ -146,23 +146,60 @@ yunti_list_browser_targets
 Agent 应能看到 Chrome / Edge 的可访问标签页，并可直接使用 `tabId`、`targetId` 或
 `browserSessionId` 开始操作。
 
-### 5. 更新
+## 更新已安装的版本
+
+源码安装不会自动更新：仓库、正在跑的 bridge 进程、浏览器里的扩展是三份独立的副本，
+要分别刷新。按下面顺序做。
+
+### 1. 先看你现在是什么版本
 
 ```bash
+npm run doctor
+```
+
+它会同时报告**当前包**、**正在运行的 bridge**、**浏览器里加载的扩展**三个版本。
+三者一致才是干净状态；更新前的输出也顺便告诉你运行时目录在哪。
+
+### 2. 更新源码
+
+**用 git 安装的：**
+
+```bash
+cd <你的运行时目录>
 git fetch --tags
 git checkout v0.2.8
 ```
 
-跟随 `main` 开发版时改用 `git pull`。更新后有两处要一起刷新，否则 `npm run doctor`
-会报版本不匹配（它会对比当前包、正在运行的 bridge 和浏览器里的扩展）：
+跟随开发版就跳过 `git checkout`，留在 `main` 分支改用 `git pull`，这样会包含尚未发布的
+改动。checkout 到 tag 后处于 detached HEAD 状态是正常的，下次更新换新 tag 即可。
 
-1. 重启 MCP server / bridge 进程 —— 让 Agent 重开会话即可。
-2. 在 `chrome://extensions` 或 `edge://extensions` 中点击本扩展的“重新加载”。
+**用 zip 安装的（没有 git）：**
 
-两步都做完 `npm run doctor` 仍报版本不匹配时，通常是旧的 bridge 进程还占着端口，见
-[FAQ](#faq) 里的排查步骤。
+到 [Releases](https://github.com/BoCodeLab/yunti-browser-runtime/releases) 下载新版的
+`Source code (zip)`，解压后**把里面的内容覆盖到原来的运行时目录**。注意解压出来会多一层
+目录，不要整个套进去 —— MCP 配置里写死的是原目录的绝对路径，目录层级变了 Agent 会找不到
+server。
 
-如果更新后 `npm run doctor` 报协议或版本不匹配，先重新加载扩展，再重试。
+### 3. 更新后必须做的两件事
+
+只更新源码不生效，下面两处都要做，否则 `npm run doctor` 会报版本不匹配：
+
+1. **重开 Agent 会话** —— 让旧的 MCP server / bridge 进程结束，新会话启动时会以当前版本
+   重新拉起 bridge。
+2. **重新加载浏览器扩展** —— 在 `chrome://extensions` 或 `edge://extensions` 里点本扩展的
+   “重新加载”。源码安装走的是“加载已解压的扩展程序”，扩展不会自己更新。
+
+`npm install` 不需要重跑：运行时（MCP server、本地 Bridge、CLI、扩展）没有第三方依赖，
+只有 `playwright-core` 用于真实浏览器测试，要跑测试时再装一次即可。
+
+### 4. 两步都做完，doctor 仍报版本不匹配
+
+通常是**还有一个旧版本的 bridge 进程占着 `127.0.0.1:48887`**：新会话启动 MCP server 时
+发现端口被占用，会以 proxy 模式连到那个旧进程，版本于是永远停在旧的。这种情况必须先结束
+旧进程，具体命令见下方 FAQ 的「升级后 npm run doctor 仍报 bridge 版本不匹配」。
+
+如果 doctor 报的是协议不匹配（`YUNTI_EXTENSION_PROTOCOL_MISMATCH`），先做第 3 步的重新
+加载扩展，再重试；这一项不匹配时重试浏览器工具是无效的。
 
 ## 交给 Agent 安装
 

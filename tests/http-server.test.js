@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { createRequire } from "node:module"
-import { BRIDGE_TOKEN_HEADER, startBridgeServer } from "../mcp/server.js"
+import { BRIDGE_TOKEN_HEADER, startBridgeServer, handleJsonRpc } from "../mcp/server.js"
 
 const require = createRequire(import.meta.url)
 const packageJson = require("../package.json")
@@ -359,8 +359,8 @@ test("/mcp/local-tool serves page selection and sanitized diagnostics", async ()
       method: "POST",
       body: { tool: "yunti_not_a_tool", arguments: { userId: "local" } },
     })
-    assert.equal(unknown.status, 500)
-    assert.match(unknown.json.error, /unknown bridge-local tool/)
+    assert.equal(unknown.status, 400)
+    assert.match(unknown.json.error, /unknown tool/)
   })
 })
 
@@ -449,5 +449,28 @@ test("protected routes require the bridge token when auth is enabled", async () 
     const authorized = await request("/health")
     assert.equal(authorized.json.authorized, true)
     assert.equal(authorized.json.auth.required, true)
+  })
+})
+
+test("both HTTP endpoints dispatch diagnostics and proxy failures keep their recovery fields", async () => {
+  await withBridge(async ({ bridge, request, port }) => {
+    bridge.hub.registerSession({ browserSessionId: "page", userId: "local", tabId: 101 })
+    for (const endpoint of ["/mcp/request", "/mcp/local-tool"]) {
+      const response = await request(endpoint, { method: "POST", body: { tool: "yunti_list_network_requests", arguments: { browserSessionId: "page" } } })
+      assert.equal(response.status, 200)
+      assert.equal(response.json.result.effectiveRoute.tabId, 101)
+      const invalid = await request(endpoint, { method: "POST", body: { tool: "yunti_evaluate_script", arguments: { expression: "1", timeout_ms: 90000 } } })
+      assert.equal(invalid.status, 400)
+      assert.equal(invalid.json.failure.retryBudget, 0)
+    }
+    bridge.hub.callBridgeLocalTool = async () => {
+      const error = new Error("Fixture page route failed")
+      error.structuredFailure = { code: "CONTENT_SCRIPT_UNAVAILABLE", retryable: true, retryBudget: 1, resultUncertain: false, recoveryAction: "list_targets", diagnostics: { phase: "route" } }
+      throw error
+    }
+    const response = await handleJsonRpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "yunti_list_network_requests", arguments: { browserSessionId: "page" } } }, { mode: "proxy", port, bridgeToken: "test-token" })
+    assert.equal(response.result.structuredContent.code, "CONTENT_SCRIPT_UNAVAILABLE")
+    assert.equal(response.result.structuredContent.retryBudget, 1)
+    assert.equal(response.result.structuredContent.diagnostics.phase, "route")
   })
 })

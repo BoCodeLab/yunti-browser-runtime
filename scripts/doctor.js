@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import http from "node:http"
+import { homedir } from "node:os"
+import { inspectSkillCopies } from "../lib/skill-status.js"
 import { existsSync, readFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -225,6 +227,9 @@ function buildNextSteps(checks) {
   if (!checks.skill.ok) {
     steps.push(`Restore the agent skill at ${checks.skill.path}.`)
   }
+  if (checks.skill.mismatches) {
+    steps.push("Installed agent skills differ from this package. Compare checks.skill.installations and run install-skill for each intended harness after updating the runtime and extension together.")
+  }
   return steps
 }
 
@@ -239,7 +244,7 @@ function humanSummary(report) {
     `- Extension: ${report.checks.bridge.extensionConnected ? "connected" : "not detected"}${report.checks.bridge.browserControllerSessionId ? `, controller ${report.checks.bridge.browserControllerSessionId}` : ""}`,
     `- Compatibility: ${report.checks.bridge.compatibility?.ok ? "ok" : "mismatch"} (runtime ${packageVersion}, expected extension ${expectedExtensionVersion}, protocol ${expectedProtocolVersion})`,
     `- MCP server: ${report.checks.mcpServer.ok ? "found" : "missing"}`,
-    `- Skill: ${report.checks.skill.ok ? "found" : "missing"}`,
+    `- Skill: ${report.checks.skill.ok ? "found" : "missing"}, sha256=${report.checks.skill.sha256 || "unavailable"}, differing copies=${report.checks.skill.mismatches}`,
   ]
   if (report.nextSteps.length) {
     lines.push("Next steps:")
@@ -252,7 +257,13 @@ const checks = {
   node: nodeVersionStatus(),
   bridge: await checkBridge(),
   mcpServer: checkFile(mcpServerPath),
-  skill: checkFile(skillPath),
+  skill: {
+    ...checkFile(skillPath), runtimeVersion: packageVersion,
+    ...inspectSkillCopies(skillPath, [
+      ...[".agents", ".codex", ".claude", ".cursor", ".cline", ".dsh"].map(harness => join(homedir(), harness, "skills", "yunti-browser-runtime", "SKILL.md")),
+      join(process.env.HERMES_HOME || join(homedir(), ".hermes"), "skills", "yunti-browser-runtime", "SKILL.md"),
+    ]),
+  },
 }
 const nextSteps = buildNextSteps(checks)
 const report = {

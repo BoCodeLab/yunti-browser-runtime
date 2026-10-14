@@ -1,0 +1,5 @@
+name: yunti-reliability
+manifest_version: 2
+version: 1.0.0
+description: Keep Yunti page failures out of the MCP service circuit breaker.
+author: Yunti Browser Runtime

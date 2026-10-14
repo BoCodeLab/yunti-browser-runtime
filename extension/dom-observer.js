@@ -38,6 +38,8 @@
     /\b\d{1,6}\s+[\p{L}0-9 .'-]{2,}\s+(street|st|road|rd|avenue|ave|lane|ln|boulevard|blvd|drive|dr|way|court|ct)\b|[\p{Script=Han}]{1,20}(省|市|区|县|路|街|号楼|单元|室)/iu
   let lastObservationState = null
   let uidGeneration = 0
+  let observedNodes = new Map()
+  let observedUrl = ""
   const activeWaits = new Set()
 
   function observePage(args = {}) {
@@ -57,6 +59,7 @@
     }
     const uidScope = nextUidScope()
     const observationId = `obs-${uidScope}`
+    const nodes = responseMode === "delta" ? null : new Map()
 
     const scope = mode === "fullPage" ? "fullPage" : "viewport"
     const candidates = collectInteractiveCandidates()
@@ -81,6 +84,7 @@
         visible,
       })
       elements.push(item)
+      nodes?.set(uid, element)
       if (includeTextTree) textLines.push(formatTextTreeLine(item))
     }
 
@@ -91,6 +95,7 @@
       redaction,
       redactions,
       uidScope,
+      nodes,
     })
     const hints = buildHints(elements, scrollableContainers)
     const warnings = []
@@ -133,6 +138,8 @@
     }
 
     if (responseMode !== "delta") {
+      observedNodes = nodes
+      observedUrl = location.href
       lastObservationState = captureObservationState(baseObservation)
       return baseObservation
     }
@@ -161,6 +168,7 @@
 
     const candidates = collectInteractiveCandidates()
     const matches = []
+    const nodes = new Map()
     let uidCounter = 0
 
     for (const element of candidates) {
@@ -183,8 +191,11 @@
         placeholderFilter,
       })) continue
       matches.push(item)
+      nodes.set(item.uid, element)
     }
 
+    observedNodes = nodes
+    observedUrl = location.href
     return {
       observationId: `find-${uidScope}`,
       browserSessionId: globalScope.__YUNTI_BROWSER_SESSION_ID__ || null,
@@ -665,6 +676,7 @@
       if (containers.length >= options.maxElements) break
       if (isYuntiWidgetElement(element) || !isVisible(element) || !isScrollable(element)) continue
       uidCounter += 1
+      options.nodes?.set(`scroll-${options.uidScope}-${uidCounter}`, element)
       containers.push(cleanObject({
         uid: `scroll-${options.uidScope}-${uidCounter}`,
         tag: element.tagName.toLowerCase(),
@@ -1091,7 +1103,20 @@
     return out
   }
 
+  function resolveUid(uid) {
+    const element = observedNodes.get(String(uid || ""))
+    if (!element || element.isConnected === false || observedUrl !== location.href) return null
+    let owner = element.ownerDocument
+    while (owner && owner !== document) {
+      const frame = owner.defaultView?.frameElement
+      if (!frame || !frame.isConnected || frame.contentDocument !== owner) return null
+      owner = frame.ownerDocument
+    }
+    return element
+  }
+
   globalScope.YuntiBrowserRuntimeObserver = {
+    resolveUid,
     observePage,
     findElements,
     waitForCondition,

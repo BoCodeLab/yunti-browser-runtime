@@ -9,3 +9,4 @@ extension.zip
 .npmrc
 .artifacts/
 .probe-out*/
+__pycache__/

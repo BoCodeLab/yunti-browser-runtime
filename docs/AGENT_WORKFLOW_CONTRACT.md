@@ -23,6 +23,17 @@ Use this loop for normal page work:
 
 ## Recovery Rules
 
+Independent tasks use independent tabs and explicit page routes. A page handle
+does not reserve a tab for one agent. For deliberately shared work, pass the
+observation id with its uid and verify the business postcondition after acting.
+Diagnostic buffers have their own concrete-page route contract; inspect the
+returned effective route before trusting or clearing them.
+
+For pagination, verify the target page, loading state, row count and data
+fingerprint before collecting. A click receipt or elapsed sleep is not evidence
+of advancement. Stop on a repeated whole page and distinguish dynamic ordering
+from duplicate collection.
+
 - Stale route: discard the stale id, list targets once, and spend the single
   allowed retry on the selected live page route.
 - Protocol mismatch: `YUNTI_EXTENSION_PROTOCOL_MISMATCH` has `retryBudget=0`.

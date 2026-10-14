@@ -1128,7 +1128,7 @@ test("mcp usage hints include P3.2 parameter guidance for fill and CDP", async (
 
   assert.equal(fillResponse.result.isError, undefined)
   const fillPayload = JSON.parse(fillResponse.result.content[0].text)
-  assert.equal(fillPayload.version, "2026-07-22")
+  assert.equal(fillPayload.version, "2026-10-14")
   assert.equal(fillPayload.tools.yunti_fill.schema.required.includes("value"), true)
   assert.match(fillPayload.tools.yunti_fill.notes.join("\n"), /Coordinate-only fill is not supported/)
 
@@ -2178,12 +2178,12 @@ test("yunti_clear_network_requests clears network observations like the legacy l
   })
 
   assert.equal(hub.listNetworkEvents({ browserSessionId: "tab-1", userId: "u1" }).returned, 1)
-  assert.deepEqual(
-    await hub.callBridgeLocalTool("yunti_clear_network_requests", {
+  assert.equal(
+    (await hub.callBridgeLocalTool("yunti_clear_network_requests", {
       browserSessionId: "tab-1",
       userId: "u1",
-    }),
-    { deleted: 1 }
+    })).deleted,
+    1
   )
   assert.equal(hub.listNetworkEvents({ browserSessionId: "tab-1", userId: "u1" }).returned, 0)
 })
@@ -2644,7 +2644,7 @@ test("a closed tab makes its handle terminal instead of rebinding a reused tab i
   assert.equal((await call).textTree, "reused tab")
 })
 
-test("a handle whose tab disappeared or browser instance is gone fails terminally", async () => {
+test("closed tabs and offline browser instances have distinct zero-retry failures", async () => {
   const hub = new BridgeHub()
   registerControllerWithHandles(hub, {
     browserSessionId: "yunti-browser-aaaa",
@@ -2658,7 +2658,7 @@ test("a handle whose tab disappeared or browser instance is gone fails terminall
   )
   await assert.rejects(
     hub.callTool("yunti_observe_page", { userId: "u1", pageHandleId: "yunti-tab-zzzz-100-1" }, 1000),
-    /YUNTI_PAGE_HANDLE_CLOSED/
+    /YUNTI_BROWSER_INSTANCE_OFFLINE/
   )
 })
 

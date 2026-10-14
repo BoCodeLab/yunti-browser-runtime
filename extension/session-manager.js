@@ -63,6 +63,7 @@ export function createSessionManager(options = {}) {
   let controllerPollerRoute = ""
   let controllerPollerLastProgressAt = 0
   const tabToolQueues = new Map()
+  const activeToolOperations = new Set()
   let exclusiveToolLane = Promise.resolve()
   let browserToolLane = Promise.resolve()
   let controllerSession = null
@@ -401,6 +402,35 @@ export function createSessionManager(options = {}) {
     const queueKey = controllerToolQueueKey(event)
     const tabTail = tabToolQueues.get(queueKey)
     const queuedAt = Date.now()
+    const operation = new AbortController()
+    let executionStarted = false, queueExpired = false
+    let executionStartedAt = 0, effectiveTimeoutMs = 0
+    const publishFailure = async (error, phase) => !stopped && postBridge("/extension/result", {
+      browserSessionId: session.browserSessionId, requestId: event.id, ok: false,
+      error: error?.message || String(error),
+      failure: {
+        code: phase === "queue" ? error.code || "YUNTI_TOOL_QUEUE_TIMEOUT" : "EXTENSION_TOOL_TIMEOUT",
+        retryable: phase === "queue", retryBudget: phase === "queue" ? 1 : 0,
+        resultUncertain: phase !== "queue",
+        recoveryAction: phase === "queue" ? "retry_once_after_lane_is_ready" : "verify_state_before_retry",
+        diagnostics: {
+          operationId: event.id, phase,
+          queuedMs: (executionStartedAt || Date.now()) - queuedAt,
+          executedMs: executionStartedAt ? Date.now() - executionStartedAt : 0,
+          effectiveTimeoutMs, mayStillBeRunning: phase !== "queue",
+        },
+      },
+    }).catch(() => {})
+    const queueTimer = setTimeout(() => {
+      if (!executionStarted && !stopped) {
+        queueExpired = true
+        const code = Number.isFinite(Number(event.deadlineAt)) && Date.now() >= Number(event.deadlineAt) ? "YUNTI_TOOL_QUEUE_TIMEOUT" : "YUNTI_TAB_BUSY"
+        const error = new Error(`${code}: browser tool request timed out in the queue before execution: ${event.tool}`)
+        error.code = code
+        void publishFailure(error, "queue")
+      }
+    }, Math.min(controllerToolQueueWaitTimeoutMs, Number.isFinite(Number(event.deadlineAt)) ? Math.max(1, Number(event.deadlineAt) - Date.now()) : controllerToolQueueWaitTimeoutMs))
+    queueTimer?.unref?.()
     let startAfter
     if (queueKey === "exclusive") {
       startAfter = Promise.all([
@@ -416,7 +446,8 @@ export function createSessionManager(options = {}) {
       ]).then(() => {})
     }
     const next = startAfter.then(async () => {
-      if (stopped) return
+      clearTimeout(queueTimer)
+      if (stopped || queueExpired) return
       try {
         if (Number.isFinite(Number(event.deadlineAt)) && Number(event.deadlineAt) <= Date.now()) {
           throw new Error(`Browser tool request timed out before execution: ${event.tool || "unknown"}`)
@@ -436,23 +467,27 @@ export function createSessionManager(options = {}) {
         const remainingMs = Number.isFinite(deadlineAt)
           ? deadlineAt - Date.now()
           : controllerToolTimeoutMs
-        const budgetMs = Math.min(controllerToolTimeoutMs, remainingMs)
+        const declaredMs = ["yunti_wait_for", "yunti_evaluate_script"].includes(event.tool) ? Math.max(0, Number(event.arguments?.timeoutMs) || 0) : 0
+        const budgetMs = Math.min(Math.max(controllerToolTimeoutMs, declaredMs + 2000), remainingMs)
+        executionStarted = true
+        executionStartedAt = Date.now()
+        effectiveTimeoutMs = Math.min(budgetMs, Math.max(controllerToolWatchdogMs, declaredMs ? declaredMs + 1000 : 0))
+        activeToolOperations.add(operation)
         // The one-shot watchdog bounds how long this request holds the lane,
         // even when the underlying page operation never settles. Resolution is
         // signalled here so the queue can drain; the abandoned operation is
         // discarded when its (late) result arrives.
         await withTimeout(
-          toolRequestHandler(null, session, event),
-          Math.min(budgetMs, controllerToolWatchdogMs),
-          `Browser tool execution timed out inside the extension: ${event.tool || "unknown"}`
+          toolRequestHandler(null, session, { ...event, signal: operation.signal }),
+          effectiveTimeoutMs,
+          `Browser tool execution timed out inside the extension: ${event.tool || "unknown"}`,
+          operation.signal
         )
       } catch (error) {
-        await postBridge("/extension/result", {
-          browserSessionId: session.browserSessionId,
-          requestId: event.id,
-          ok: false,
-          error: error?.message || String(error),
-        }).catch(() => {})
+        operation.abort()
+        await publishFailure(error, executionStarted ? "execution" : "queue")
+      } finally {
+        activeToolOperations.delete(operation)
       }
     })
     if (queueKey === "exclusive") {
@@ -886,6 +921,7 @@ export function createSessionManager(options = {}) {
   }
 
   function stop() {
+    for (const operation of activeToolOperations) operation.abort()
     stopped = true
     controllerPoller?.abort()
     controllerPoller = null
@@ -1009,16 +1045,23 @@ function isTimeoutError(error) {
   return /timed out/i.test(error?.message || String(error || ""))
 }
 
-async function withTimeout(promise, timeoutMs, message) {
+async function withTimeout(promise, timeoutMs, message, signal = null) {
   let timer = null
+  let onAbort
   try {
     return await Promise.race([
       Promise.resolve(promise),
+      ...(signal ? [new Promise((_, reject) => {
+        onAbort = () => reject(new Error("Browser tool operation stopped; already dispatched effects are not undone"))
+        signal.addEventListener("abort", onAbort, { once: true })
+        if (signal.aborted) onAbort()
+      })] : []),
       new Promise((_, reject) => {
         timer = setTimeout(() => reject(new Error(message)), timeoutMs)
       }),
     ])
   } finally {
     clearTimeout(timer)
+    if (onAbort) signal.removeEventListener("abort", onAbort)
   }
 }

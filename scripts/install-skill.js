@@ -7,6 +7,7 @@ import { access, cp, mkdir, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { skillFingerprint } from "../lib/skill-status.js"
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const skillSource = join(rootDir, "skills", "yunti-browser-runtime")
@@ -122,6 +123,8 @@ async function main() {
     dryRun: args.dryRun,
     replaced: alreadyInstalled && (args.force || args.dryRun),
     action: "installed",
+    packagedSha256: skillFingerprint(join(skillSource, "SKILL.md")),
+    installedSha256: skillFingerprint(join(destDir, "SKILL.md")),
   }
 
   if (alreadyInstalled && !args.force && !args.dryRun) {
@@ -144,6 +147,7 @@ async function main() {
     await mkdir(dirname(destDir), { recursive: true })
     if (alreadyInstalled) await rm(destDir, { recursive: true, force: true })
     await cp(skillSource, destDir, { recursive: true })
+    report.installedSha256 = skillFingerprint(join(destDir, "SKILL.md"))
     report.nextSteps = [
       "Start a new agent session so the harness discovers the skill.",
     ]

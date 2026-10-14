@@ -13,11 +13,16 @@ Then call `yunti_list_browser_targets` to understand the live browser state befo
 
 ## Default Page Operation Contract
 
+Independent tasks use independent tabs and explicit routes. Close only tabs
+created by the current task. When sharing a page deliberately, pass the returned
+`observationId` with its uid; a mismatched observation is rejected. A stable
+page handle does not reserve the page for one agent.
+
 1. Call `yunti_get_tool_usage_hints` when tool usage is uncertain.
 2. Call `yunti_list_browser_targets`; use the intended page's
    `browserSessionId` when registered, otherwise use its `tabId` / `targetId`.
 3. Call `yunti_observe_page` before page actions.
-4. Prefer fresh uids for click, hover, fill, select, scroll, type, press, upload, and drag operations. A uid belongs only to the observation that created it; never carry it across a later observe, find, wait, navigation, or rerender.
+4. Prefer fresh uids for click, hover, fill, select, scroll, type, press, and upload operations. Drag uses its documented from/to coordinates. A uid belongs only to the observation that created it; never carry it across a later observe, find, wait, navigation, or rerender.
 5. After each action, verify by observing again or using snapshot, evaluate, screenshot, network, or console tools.
 6. For async rendering, validation, navigation, option loading, or infinite scroll, call `yunti_wait_for`, then `yunti_observe_page`, then continue with a fresh uid. Text and selector waits can traverse same-origin iframes and open shadow roots.
 7. If a result has `ok: false`, read `retryable`, `retryBudget`,
@@ -170,6 +175,17 @@ Ask the user before submitting, deleting, approving, purchasing, publishing, upl
 
 ## Parameter Rules
 
+- Unknown arguments are rejected. Use the live schema instead of guessing
+  `timeout_ms`, `maxChars`, or other names from a different tool.
+- Diagnostic network, console and CDP-buffer tools require `browserSessionId`;
+  they do not accept `tabId`, `targetId` or `pageHandleId`. Check `effectiveRoute`.
+  Clearing requires an explicit page or `allSessions:true`, without another route.
+- `yunti_evaluate_script` uses `timeoutMs` for its CDP execution budget and
+  `maxLength` for returned UTF-16 string units. `maxLength:0` returns no value
+  content. A truncated object/array returns `value:null`, `truncated:true`,
+  `totalChars` and `dataCompleteness`; request a smaller slice. Async expressions
+  require `awaitPromise:true`; `promisePending` is not completed data.
+
 - `yunti_click` and `yunti_hover` need `uid`, `selector`, or both `x` and `y`; prefer a fresh uid from `yunti_observe_page` once available, or call `yunti_take_snapshot` for the current compatibility path.
 - `yunti_fill` requires `value` plus `uid` or `selector`; coordinate-only fill is not supported.
 - `yunti_close_page` accepts `browserSessionId`, not raw `tabId` or `targetId`; use `yunti_cdp_send_command` with `Target.closeTarget` for raw browser targets.
@@ -187,6 +203,19 @@ Ask the user before submitting, deleting, approving, purchasing, publishing, upl
 - If the target tab is uncertain, call `yunti_list_browser_targets` and continue with the intended `browserSessionId`.
 
 ## Action Results
+
+`transportStatus:completed` means that a reply was received. Inspect root `ok`,
+`actionStatus`, per-field results and `dataCompleteness` separately. A failed
+network event does not make the diagnostics query fail; `WAIT_TIMEOUT` is an
+unmet condition. `tables` is a rendered-DOM preview: use its total/returned row
+and column counts, `isPreview`, `truncated`, and `tablesTruncated` before making
+claims about complete data.
+
+For pagination, establish the target page and previous data fingerprint first.
+After acting, wait for the target page, loading to finish, expected row count
+and a new fingerprint. Collect only after all checks pass; stop on a repeated
+whole page. Keep legitimate cross-page duplicates caused by dynamic ordering
+separate. A click receipt or fixed sleep does not establish page advancement.
 
 - Current action results may use compatibility fields such as `clicked`, `hovered`, `filled`, `selected`, `scrolled`, `typed`, `pressed`, `uploaded`, `dragged`, aggregate counts like `failed`, per-field `results`, wait fields like `found` / `waitedMs`, `uid`, `selector`, coordinates, `method`, `valueLength`, `before`, `after`, and `browserSessionId`.
 - Structured P6.2 fields are additive when present: prefer `action`, `target`, `ok`, `recoverable`, and `nextStepHint`, while still reading existing compatibility fields.
@@ -249,6 +278,11 @@ Ask the user before submitting, deleting, approving, purchasing, publishing, upl
 
 ## Recovery
 
+- `YUNTI_BROWSER_INSTANCE_OFFLINE` does not prove a closed tab. Wait for the
+  controller and list targets; do not keep probing the same request.
+- `YUNTI_INVENTORY_STALE` requires a fresh target inventory. A confirmed
+  `YUNTI_PAGE_HANDLE_CLOSED` remains terminal with zero retries.
+
 - No connected route: run doctor first. If the extension controller is online
   but no page session is active, call `yunti_list_browser_targets` and pass the
   intended `tabId` / `targetId` to the page tool; the controller establishes the
@@ -256,13 +290,13 @@ Ask the user before submitting, deleting, approving, purchasing, publishing, upl
   runtime when background injection stalls. Ask the user to refresh only after
   automatic recovery fails because the page is unsupported or browser access is
   explicitly blocked.
-- Stale session: retry the page operation once so controller recovery can run.
-  If it still fails, call `yunti_list_browser_targets` without the stale id and
-  retry with the latest `browserSessionId`, `tabId`, or `targetId`. Do not ask the
-  user to refresh, switch tabs, or restart the browser as the default recovery.
-- Extension-side timeout: the controller remains available even when one page
-  operation times out. Inspect targets and retry the intended live tab once;
-  do not assume the whole browser session is disconnected.
+- Stale session: discard the stale id and list targets once without it. Select
+  the intended live page, then spend at most the returned shared retry budget.
+  Never replay the expired id or allocate another budget to a fallback backend.
+- Extension-side or CDP execution timeout: a result may still be running. Read
+  the structured failure and inspect current state; do not replay a write or
+  assume that dropping a late response cancelled it. Queue failures explicitly
+  marked as not executed can use their single shared retry after the lane clears.
 - Stale or missing page uid: observe again once `yunti_observe_page` is available, or take a fresh snapshot for compatibility workflows.
 - Wrong tab: use `yunti_list_browser_targets` to find the intended tab, then route CDP with that tab's `tabId` or `targetId`.
 - Parameter uncertainty: call `yunti_get_tool_usage_hints` with the specific tool name.

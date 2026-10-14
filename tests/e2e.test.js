@@ -8,6 +8,7 @@ import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { handleJsonRpc, startBridgeServer } from "../mcp/server.js"
 import packageJson from "../package.json" with { type: "json" }
+import { copyIsolatedExtension } from "./helpers/isolated-extension.js"
 
 const runE2e = process.env.YUNTI_E2E === "1"
 const headless = process.env.YUNTI_E2E_HEADLESS === "1"
@@ -48,6 +49,7 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
   const bridgeUrl = `http://127.0.0.1:${bridgePort}`
   const pageServer = await startTestPageServer()
   const userDataDir = await mkdtemp(join(tmpdir(), "yunti-browser-profile-"))
+  const runtimeExtensionDir = await copyIsolatedExtension(extensionDir, join(userDataDir, "fixture-extension"), bridgeUrl)
   // Both executables must live in distinct profile dirs; when they are the same
   // binary the second context would fight the first one over the profile lock.
   const secondUserDataDir =
@@ -62,7 +64,7 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
   try {
     context = await playwright.chromium.launchPersistentContext(
       userDataDir,
-      launchOptions(primaryExecutable)
+      launchOptions(primaryExecutable, runtimeExtensionDir)
     )
 
     const worker = await getExtensionWorker(context)
@@ -102,7 +104,7 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
     if (secondUserDataDir) {
       secondContext = await playwright.chromium.launchPersistentContext(
         secondUserDataDir,
-        launchOptions(secondaryExecutable)
+        launchOptions(secondaryExecutable, runtimeExtensionDir)
       )
       const secondWorker = await getExtensionWorker(secondContext)
       await secondWorker.evaluate(
@@ -198,7 +200,7 @@ test("real browser extension bridge smoke", { skip: runE2e ? false : "set YUNTI_
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const repeatedSnapshot = await callTool(bridge, "yunti_get_page_snapshot", {
         browserSessionId,
-        mode: "compact",
+        mode: "light",
       })
       assert.equal(repeatedSnapshot.browserSessionId, browserSessionId)
       assert.match(repeatedSnapshot.visibleText, /Yunti E2E Smoke/)
@@ -311,13 +313,13 @@ async function loadPlaywright() {
   )
 }
 
-function launchOptions(executablePath = "") {
+function launchOptions(executablePath = "", runtimeExtensionDir = extensionDir) {
   return {
     headless: process.env.YUNTI_E2E_HEADLESS === "1",
     ...(executablePath ? { executablePath } : {}),
     args: [
-      `--disable-extensions-except=${extensionDir}`,
-      `--load-extension=${extensionDir}`,
+      `--disable-extensions-except=${runtimeExtensionDir}`,
+      `--load-extension=${runtimeExtensionDir}`,
     ],
   }
 }

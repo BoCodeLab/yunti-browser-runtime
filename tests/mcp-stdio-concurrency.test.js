@@ -4,15 +4,35 @@ import { spawn } from "node:child_process"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { createInterface } from "node:readline"
+import http from "node:http"
+import packageJson from "../package.json" with { type: "json" }
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, "..")
 
 // MCP stdio client used to observe request/response ordering.
-function startStdioServer() {
+async function startStdioServer() {
+  const fixture = http.createServer(async (req, res) => {
+    res.setHeader("content-type", "application/json")
+    if (req.url.startsWith("/console/state")) {
+      res.end(JSON.stringify({ runtime: { version: packageJson.version } }))
+      return
+    }
+    if (req.url === "/mcp/request") {
+      // A private proxy response supplies genuine in-flight IO without routing
+      // synthetic requests through the user's installed browser bridge.
+      for await (const _chunk of req) {}
+      await new Promise(resolve => setTimeout(resolve, 250))
+      res.end(JSON.stringify({ ok: true, result: { found: false, code: "WAIT_TIMEOUT" } }))
+      return
+    }
+    res.end(JSON.stringify({ ok: true }))
+  })
+  await new Promise(resolve => fixture.listen(0, "127.0.0.1", resolve))
   const child = spawn(process.execPath, [join(ROOT, "mcp", "server.js")], {
     cwd: ROOT,
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, YUNTI_BROWSER_BRIDGE_PORT: String(fixture.address().port), YUNTI_BROWSER_RELAY_URL: "", YUNTI_BROWSER_BRIDGE_TOKEN: "" },
   })
   const pending = new Map()
   const order = []
@@ -64,6 +84,8 @@ function startStdioServer() {
       } catch {
         // ignore
       }
+      fixture.closeAllConnections()
+      fixture.close()
     },
   }
 }
@@ -71,7 +93,7 @@ function startStdioServer() {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 test("stdio answers a fast request while a slow tool call is still in flight", async () => {
-  const server = startStdioServer()
+  const server = await startStdioServer()
   try {
     await sleep(1500) // allow the bridge child to reach proxy/owner mode
     server.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })
@@ -109,7 +131,7 @@ test("stdio answers a fast request while a slow tool call is still in flight", a
 })
 
 test("stdio keeps answering after a parse error and still correlates ids", async () => {
-  const server = startStdioServer()
+  const server = await startStdioServer()
   try {
     await sleep(1500)
     server.sendRaw("{not json")
@@ -130,7 +152,7 @@ test("stdio keeps answering after a parse error and still correlates ids", async
 })
 
 test("initialization and tool listing are advertised with the package version", async () => {
-  const server = startStdioServer()
+  const server = await startStdioServer()
   try {
     await sleep(1500)
     server.send({ jsonrpc: "2.0", id: 7, method: "initialize", params: {} })
