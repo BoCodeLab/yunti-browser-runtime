@@ -11,7 +11,7 @@
 [![MCP](https://img.shields.io/badge/MCP-54_tools-111111)](docs/TOOL_GUIDE.md)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
-[首次安装](#快速开始首次安装) · [更新](#更新已安装的版本) · [核心能力](#核心能力) · [工作原理](#工作原理) · [交给-agent-安装](#交给-agent-安装) · [文档](#文档导航)
+[首次安装](#快速开始首次安装) · [更新](#更新已安装的版本) · [核心能力](#核心能力) · [工作原理](#工作原理) · [交给-agent-安装或更新](#交给-agent-安装或更新) · [文档](#文档导航)
 
 </div>
 
@@ -38,6 +38,18 @@ Yunti Browser Runtime 是一个面向 MCP Agent 的本地浏览器运行时。�
 | 会话稳定性 | 每个浏览器实例一条 controller 通道，旧 session、睡眠标签和 MV3 恢复由 runtime 处理 |
 | 数据边界 | Bridge 默认只监听 `127.0.0.1`，无远程服务、无平台账号、默认无 token |
 | Agent 行为 | 结构化错误、共享重试预算、写操作不确定性与恢复建议 |
+
+### 0.2.9 可靠性修复、大结果导出与下载报告
+
+`0.2.9` 落实 2026-10 使用审计的 14 项必须修复项，重点消除三类**会产生错误证据**的缺陷：
+观察 uid 绑定真实节点（不再可能点中另一个元素）、诊断工具显式拒绝不支持的页面路由
+（不再静默取错页）、超长结果保持 JSON 合法并如实标注截断。同时新增两个高层能力——
+`yunti_read_result_chunk` 分块读取超长结果（带 sha256 可校验拼接完整性），
+`yunti_list_downloads` 报告下载落点与状态。工具数 52 → 54。
+
+**升级注意**：本版本新增 `downloads` 权限（只读，不接管下载），重新加载扩展时浏览器会
+提示确认；`yunti_navigate_page` 新增可选的 `waitForStage`，默认行为不变。
+详细说明见 [0.2.9 发布说明](docs/RELEASE_0_2_9.md)。
 
 ### 0.2.8 源码安装与并发/延迟优化
 
@@ -73,7 +85,7 @@ Node.js 22 或更高版本：
 ```bash
 git clone https://github.com/BoCodeLab/yunti-browser-runtime.git
 cd yunti-browser-runtime
-git checkout v0.2.8
+git checkout v0.2.9
 npm install
 ```
 
@@ -167,7 +179,7 @@ npm run doctor
 ```bash
 cd <你的运行时目录>
 git fetch --tags
-git checkout v0.2.8
+git checkout v0.2.9
 ```
 
 跟随开发版就跳过 `git checkout`，留在 `main` 分支改用 `git pull`，这样会包含尚未发布的
@@ -201,12 +213,12 @@ server。
 如果 doctor 报的是协议不匹配（`YUNTI_EXTENSION_PROTOCOL_MISMATCH`），先做第 3 步的重新
 加载扩展，再重试；这一项不匹配时重试浏览器工具是无效的。
 
-## 交给 Agent 安装
+## 交给 Agent 安装或更新
 
-不想自己逐步配置时，把下面整段复制给 Agent：
+不想自己逐步配置时，把对应的一段整段复制给 Agent。**首次安装**和**更新已有安装**是两套不同步骤，别混用。
 
 <details>
-<summary><strong>展开安装引导提示词</strong></summary>
+<summary><strong>首次安装：展开安装引导提示词</strong></summary>
 
 ```text
 请帮我从 GitHub 源码安装并接入 Yunti Browser Runtime。它是一个本地浏览器运行时，让你通过 MCP 操作我本机 Chrome/Edge 页面。
@@ -216,19 +228,53 @@ server。
 1. 确认本机有 Node.js 22+ 和 git。
 2. 让我选一个固定目录来放仓库（例如 Windows 的 D:\tools\yunti-browser-runtime，或 macOS/Linux 的 ~/tools/yunti-browser-runtime），不要放进临时目录，然后执行：
    git clone https://github.com/BoCodeLab/yunti-browser-runtime.git
-3. 进入仓库目录，执行：npm install
-   并告诉我这一步是可选的：运行时（MCP server、本地 Bridge、CLI、浏览器扩展）没有任何第三方依赖，跳过也能正常使用，装上的 playwright-core 只服务于真实浏览器 E2E 与耐久测试。
-4. 执行：npm run print-config -- --agent 当前Agent名称 --human
-5. 根据输出把 MCP server 配置加入当前 Agent；如果输出包含 skill 安装命令，替我执行。当前 Agent 不支持 SKILL.md 时，把 skill 内容加入项目或系统指令。
-6. 告诉我 MCP server 会自动启动本地 Bridge，一般不需要单独运行 bridge。
-7. 输出扩展目录：<克隆目录>/extension（源码安装不会注册全局命令 yunti-browser-runtime，后续命令统一用 npm run <命令> 形式）。
-8. 只有浏览器“加载已解压的扩展程序”这一步需要我确认：引导我打开 chrome://extensions 或 edge://extensions，开启开发者模式并选择该目录。
+   克隆后执行 git fetch --tags 并检出最新的发布 tag（vX.Y.Z）。不要留在 main，main 可能包含尚未发布的改动。
+3. 进入仓库目录执行 npm install，并告诉我这一步是可选的：运行时（MCP server、本地 Bridge、CLI、浏览器扩展）没有任何第三方依赖，跳过也能正常使用；装上的 playwright-core 只服务于真实浏览器测试。
+4. 执行 npm run print-config -- --agent <你的 Agent 名称> --human，把输出的 MCP server 配置写入我当前正在用的这个 Agent。
+5. 执行 npm run install-skill -- --harness <你的 Agent 名称> 装上配套 skill。若提示目标已存在，加 --force 覆盖——旧 skill 里的恢复规则可能与新版本冲突。你的名称不在 codex / claude-code / cursor / cline / dsh 之内时，改用 --dest <目录>，或把 SKILL.md 内容并入本项目的指令文件。
+6. 告诉我 MCP server 会自动启动本地 Bridge，一般不需要单独运行 npm run bridge。
+7. 告诉我扩展目录是 <克隆目录>/extension。源码安装不注册全局命令，后续命令一律用 npm run <命令>。
+8. 只有“加载已解压的扩展程序”这一步需要我在浏览器里确认：引导我打开 chrome://extensions 或 edge://extensions，开启开发者模式并选择该目录。首次加载时浏览器会列出该扩展申请的权限，请逐项如实说明用途，包括 debugger（浏览器自动化）、webRequest（网络诊断）和 downloads（下载记录报告，只读、不接管下载）。
 9. 告诉我默认 Bridge URL 是 http://127.0.0.1:48887，本地默认不需要 token，不需要打开 popup、保存设置或刷新页面。
-10. 执行：npm run doctor
+10. 执行 npm run doctor，确认它报告的三处版本一致：当前包、正在运行的 bridge、浏览器里加载的扩展。
 11. doctor 正常后调用 yunti_list_browser_targets；选择目标页面并调用 yunti_get_page_snapshot 或 yunti_observe_page 验证控制能力。
-12. 在真实操作我的页面之前，先用一段话明确告诉我这个 runtime 会读取哪些数据（页面内容、控制台消息、网络请求、截图、本机学习记忆），以及这些数据只经过本机 127.0.0.1 的 Bridge、不会上传到任何远程服务，然后等我确认再继续。
+12. 在真实操作我的页面之前，先用一段话明确告诉我这个 runtime 会读取哪些数据——页面内容、控制台消息、网络请求、截图、本机学习记忆，以及默认关闭的操作台账——并说明这些数据只经过本机 127.0.0.1 的 Bridge、不会上传到任何远程服务，然后等我确认再继续。
 
-不要遗漏 packaged skill 的安装或接入。不要默认要求我刷新页面、切换标签、重启浏览器或填写 token。页面路由异常时先使用 controller、tabId/targetId 和结构化 recoveryAction 自动恢复；只有浏览器明确阻止注入且自动恢复失败时，才请求我处理。最后提醒我两件事：克隆目录不要移动或删除，因为 MCP 配置里写的是该目录的绝对路径；以后更新用 git pull，更新后要在浏览器扩展页点一次“重新加载”。
+不要遗漏 packaged skill 的安装。不要默认要求我刷新页面、切换标签、重启浏览器或填写 token。页面路由异常时先按结构化 recoveryAction 自动恢复，只有浏览器明确阻止注入且自动恢复失败时才请求我处理。
+
+最后提醒我两件事：克隆目录不要移动或删除，因为 MCP 配置里写的是该目录的绝对路径；以后更新不要直接 git pull，而是换新的发布 tag，并按“更新已有安装”的步骤同时刷新 bridge 进程和浏览器扩展。
+```
+
+</details>
+
+<details>
+<summary><strong>更新已有安装：展开更新引导提示词</strong></summary>
+
+```text
+请帮我更新本机已安装的 Yunti Browser Runtime。运行时目录是 <你的运行时目录>；如果你不确定，先执行 npm run doctor，它会报告当前包、正在运行的 bridge 和浏览器扩展三处版本。
+
+这个工具由三份互相独立的副本组成，更新时必须一起刷新，只换源码是不生效的：
+  1) 磁盘上的源码目录
+  2) 正在运行的 MCP server / Bridge 进程
+  3) 浏览器里加载的扩展
+
+请按顺序执行，不要跳步：
+
+1. 先跑 npm run doctor 记录当前状态，把三处版本读给我听。
+2. 更新源码：
+   - 用 git 安装的：git fetch --tags，然后 git checkout 最新的发布 tag。不要用 git pull 留在 main。
+   - 用 zip 安装的：从 Releases 下载新版 Source code (zip)，解压后把里面的内容覆盖到原运行时目录。注意解压会多出一层目录，不要整个套进去——MCP 配置里写的是原目录的绝对路径。
+   不需要重跑 npm install：运行时没有第三方依赖。
+3. 找出并结束旧的 bridge 进程。这一步不能跳过：只要旧进程还占着 127.0.0.1:48887，新会话启动的 MCP server 就会以 proxy 模式连到它，版本永远停在旧的。Windows 用 netstat -ano | findstr 48887 找 PID；macOS/Linux 用 lsof -ti tcp:48887。
+   结束之前先把 PID 和完整命令行念给我确认——本机可能同时跑着多个 Agent 各自的 MCP server，不要误杀无关进程。
+4. 更新已安装的 skill：npm run install-skill -- --harness <你的 Agent 名称> --force。旧 skill 的恢复规则可能与新版本冲突，必须覆盖；每个装过 Yunti skill 的 Agent 都要各跑一次。
+5. 让我在浏览器里重新加载扩展：chrome://extensions 或 edge://extensions → 找到 Yunti → 点“重新加载”。源码安装的扩展不会自动更新。
+   如果新版本新增了权限（例如 0.2.9 增加了 downloads），浏览器会提示我确认；请先说明该权限的用途，再让我点。
+6. 我重载扩展之后，重开一个新的 Agent 会话，让 MCP server 以新版本重新启动并拉起新 bridge。
+7. 再跑一次 npm run doctor，确认三处版本一致、扩展显示 connected、Skill 一项显示 differing copies=0。任何一项不对就停下来告诉我，不要反复重启或反复重试浏览器工具。
+8. 最后用只读工具验一次活体：yunti_list_browser_targets。
+
+更新完成后提醒我：不要移动或删除运行时目录；下次升级重复同样的步骤。
 ```
 
 </details>
@@ -450,7 +496,7 @@ npm run test:soak -- --duration-seconds=180 --allow-short
 | [P8 稳定页面句柄计划](docs/STABLE_PAGE_HANDLE_PLAN.md) | 标签页长期身份、session 内部恢复与验收契约 |
 | [15 分钟耐久测试](docs/SOAK_TEST.md) | 复杂 fixture、覆盖契约、产物与通过标准 |
 | [安全说明](docs/SECURITY.md) | 权限、隐私、数据脱敏和本地边界 |
-| [0.2.8 发布说明](docs/RELEASE_0_2_8.md) | 当前版本目标、实现与验收 |
+| [0.2.9 发布说明](docs/RELEASE_0_2_9.md) | 当前版本目标、实现与验收 |
 | [项目状态](docs/PROJECT_STATUS.md) | 阶段总览、实测证据和后续工作 |
 | [路线图](docs/ROADMAP.md) | 后续版本与能力规划 |
 | [发布手册](docs/RELEASE.md) | npm 发布、扩展打包与发布后验证 |
