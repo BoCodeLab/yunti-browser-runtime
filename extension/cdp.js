@@ -12,6 +12,11 @@ export function createCdpController({
   onDialogEvent = null,
 }) {
   const cdpAttachedTabs = new Set()
+  // Non-tab targets — a page's worker, a shared worker, a service worker — have
+  // no tab id but are valid chrome.debugger debuggees. They are tracked
+  // separately because every tab-keyed code path below would key them to the
+  // wrong thing.
+  const cdpAttachedTargets = new Set()
   const cdpEnabledDomains = new Map()
   const traceBuffers = new Map()
   // tabId -> { message, type, openedAt }. A native modal freezes the renderer's
@@ -143,6 +148,9 @@ export function createCdpController({
       }
     })
     chrome.debugger.onDetach.addListener((source, reason) => {
+      // A non-tab debuggee reports only a targetId. Drop the bookkeeping so a
+      // stale attach is not reused after Chrome detached it on its own.
+      if (source?.targetId && !source?.tabId) cdpAttachedTargets.delete(source.targetId)
       const tabId = source?.tabId
       if (!tabId) return
       cdpAttachedTabs.delete(tabId)
@@ -171,7 +179,13 @@ export function createCdpController({
     }
     const params = args.params || {}
     const protocolVersion = String(args.protocolVersion || "1.3")
-    const targetTabId = await resolveCdpTargetTabId(tabId, args, params)
+    const requestedTargetId = String(args.targetId || params.targetId || "").trim()
+    const explicitTabId = Number(args.tabId ?? params.tabId)
+    const targetTabId = Number.isFinite(explicitTabId) && explicitTabId > 0
+      ? explicitTabId
+      : requestedTargetId
+        ? await resolveTabIdFromTarget(requestedTargetId)
+        : tabId
     const explicitTargetId = explicitCdpTargetId(args, params)
     const targetParams =
       method.startsWith("Target.") && !params.targetId && explicitTargetId
@@ -198,6 +212,14 @@ export function createCdpController({
     }
     if (method === "Target.getTargetInfo") {
       return interceptTargetGetTargetInfo(targetParams)
+    }
+    // A targetId that maps to no tab is a non-tab target — a page's worker, a
+    // shared worker, a service worker. chrome.debugger accepts a {targetId}
+    // debuggee for exactly these, and the extension is the only layer that can
+    // attach to them, so the runtime must send there itself instead of handing
+    // the caller an instruction to call chrome.debugger.
+    if (!targetTabId && requestedTargetId) {
+      return sendNonTabCdpCommand(session, requestedTargetId, method, params, protocolVersion)
     }
     if (!Number.isFinite(Number(targetTabId)) || Number(targetTabId) <= 0) {
       throw new Error(
@@ -439,11 +461,48 @@ export function createCdpController({
     return `yunti-page-${tabId}-${suffix}`
   }
 
+  // Non-tab targets are reached with a {targetId} debuggee, kept apart from tab
+  // attaches so a worker never looks like a tab.
+  async function ensureNonTabTargetAttached(targetId, protocolVersion) {
+    if (cdpAttachedTargets.has(targetId)) return false
+    await chromeDebuggerAttach({ targetId }, protocolVersion)
+    cdpAttachedTargets.add(targetId)
+    return true
+  }
+
+  async function sendNonTabCdpCommand(session, targetId, method, params, protocolVersion) {
+    const attached = await ensureNonTabTargetAttached(targetId, protocolVersion)
+    const result = await chromeDebuggerSendCommand({ targetId }, method, params)
+    return {
+      browserSessionId: session?.browserSessionId || "",
+      method,
+      result,
+      targetId,
+      targetKind: "non-tab",
+      attached,
+      sentAt: new Date().toISOString(),
+    }
+  }
+
   async function interceptTargetAttachToTarget(params = {}, protocolVersion = "1.3") {
     const targetId = String(params.targetId || "")
     const tabId = await resolveTabIdFromTarget(targetId)
     if (!tabId) {
-      throw new Error(`Cannot resolve targetId to tab: ${targetId}. Use chrome.debugger.attach directly for non-tab targets.`)
+      // A worker, shared worker or service worker has no tab to attach to, but
+      // it is a valid chrome.debugger debuggee in its own right. Only the
+      // extension can attach to it, so this has to happen here.
+      if (!targetId) throw new Error("Target.attachToTarget requires a targetId")
+      const attached = await ensureNonTabTargetAttached(targetId, protocolVersion)
+      return {
+        method: "Target.attachToTarget",
+        result: { sessionId: `yunti-target-${targetId}` },
+        intercepted: true,
+        targetId,
+        targetKind: "non-tab",
+        attached,
+        reused: !attached,
+        sentAt: new Date().toISOString(),
+      }
     }
     if (cdpAttachedTabs.has(tabId)) {
       return {
@@ -469,6 +528,19 @@ export function createCdpController({
 
   async function interceptTargetDetachFromTarget(params = {}) {
     const targetId = String(params.targetId || "")
+    if (targetId && cdpAttachedTargets.has(targetId)) {
+      await chromeDebuggerDetach({ targetId })
+      cdpAttachedTargets.delete(targetId)
+      return {
+        method: "Target.detachFromTarget",
+        result: {},
+        intercepted: true,
+        targetId,
+        targetKind: "non-tab",
+        detached: true,
+        sentAt: new Date().toISOString(),
+      }
+    }
     let tabId = await resolveTabIdFromTarget(targetId)
     if (!tabId) {
       const sessionMatch = targetId.match(/^yunti-session-(\d+)$/)

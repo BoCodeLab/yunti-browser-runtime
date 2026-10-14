@@ -291,6 +291,48 @@ test("browser interaction semantics", { skip: runE2e ? false : "set YUNTI_E2E=1 
       assert.equal(reported.danger, "safe")
     })
 
+    await t.test("a non-tab target is reachable through its targetId", async () => {
+      // A worker has no tab, so it is the case the runtime used to reject with
+      // "cannot resolve targetId to tab".
+      await callTool("yunti_evaluate_script", {
+        browserSessionId: session,
+        expression: "(() => { const blob = new Blob(['self.onmessage = (e) => self.postMessage(e.data * 2)'], { type: 'text/javascript' }); window.__probeWorker = new Worker(URL.createObjectURL(blob)); window.__probeWorker.postMessage(21); return 'started' })()",
+      })
+
+      const listed = await callTool("yunti_cdp_send_command", {
+        browserSessionId: session,
+        method: "Target.getTargets",
+        params: {},
+      })
+      const targetInfos = listed.result?.targetInfos || []
+      const workerTarget = targetInfos.find((target) => String(target.url || "").startsWith("blob:"))
+      assert.ok(
+        workerTarget,
+        `no blob worker target was listed: ${JSON.stringify(targetInfos.map((target) => [target.type, target.url]))}`
+      )
+      assert.equal(workerTarget.tabId, null, "a worker target has no tab, which is the whole point")
+
+      const evaluated = await callTool("yunti_cdp_send_command", {
+        browserSessionId: session,
+        targetId: workerTarget.targetId,
+        method: "Runtime.evaluate",
+        params: { expression: "'reachable:' + typeof self.postMessage", returnByValue: true },
+      }, true)
+
+      assert.equal(evaluated.targetKind, "non-tab")
+      assert.equal(evaluated.result?.result?.value, "reachable:function")
+
+      // The worker still runs after the attach, so it was not disturbed. Post
+      // again here: the first reply was delivered before any handler existed.
+      const answer = await callTool("yunti_evaluate_script", {
+        browserSessionId: session,
+        expression: "new Promise((resolve) => { window.__probeWorker.onmessage = (e) => resolve(e.data); window.__probeWorker.postMessage(21) })",
+        awaitPromise: true,
+        timeoutMs: 3000,
+      })
+      assert.equal(answer.value, 42)
+    })
+
     await t.test("a navigation stage wait settles on the new document, not the old one", async () => {
       // A reload keeps the same URL and the same "complete" readyState, so only
       // the document identity proves the wait did not accept the page that was
