@@ -15,7 +15,7 @@ function installFakeChrome({ targets = [], failAttachFor = () => "" } = {}) {
   const detached = []
   const commands = []
   globalThis.chrome = {
-    runtime: { lastError: null },
+    runtime: { lastError: null, id: "own-extension-id" },
     tabs: {
       get: async (tabId) => ({ id: tabId, windowId: 1, active: false, title: `tab ${tabId}`, url: `https://tab${tabId}.test/` }),
     },
@@ -147,6 +147,9 @@ test("the target inventory lists non-tab targets with their capability", async (
       { id: "PAGE1", type: "page", url: "https://example.test/", tabId: 7, title: "Example", active: true },
       { id: WORKER_TARGET_ID, type: "other", url: "blob:https://example.test/abc", tabId: undefined, title: "" },
       { id: "PRIV1", type: "other", url: "chrome://omnibox-popup.top-chrome/", tabId: undefined, title: "" },
+      { id: "OTHEREXT", type: "worker", url: "chrome-extension://some-other-extension-id/background.js", tabId: undefined, title: "" },
+      { id: "OWNEXT", type: "worker", url: "chrome-extension://own-extension-id/background.js", tabId: undefined, title: "" },
+      { id: "NOURL", type: "other", url: "", tabId: undefined, title: "" },
     ],
   })
   const cdp = createController()
@@ -154,7 +157,7 @@ test("the target inventory lists non-tab targets with their capability", async (
   const listed = await cdp.listBrowserTargets(session)
 
   assert.equal(listed.pageCount, 1)
-  assert.equal(listed.nonTabTargetCount, 2)
+  assert.equal(listed.nonTabTargetCount, 5)
   const worker = listed.nonTabTargets.find((target) => target.targetId === WORKER_TARGET_ID)
   assert.equal(worker.kind, "non-tab")
   assert.equal(worker.tabId, null, "a non-tab target has no tab")
@@ -165,6 +168,23 @@ test("the target inventory lists non-tab targets with their capability", async (
   const privileged = listed.nonTabTargets.find((target) => target.targetId === "PRIV1")
   assert.equal(privileged.canAttach, false)
   assert.match(privileged.capabilityReason, /chrome:\/\//)
+
+  // Chrome refuses cross-extension debugging, so advertising another
+  // extension's worker as attachable costs the caller a guaranteed failure.
+  const otherExtension = listed.nonTabTargets.find((target) => target.targetId === "OTHEREXT")
+  assert.equal(otherExtension.canAttach, false)
+  assert.match(otherExtension.capabilityReason, /cross-extension/)
+
+  const ownExtension = listed.nonTabTargets.find((target) => target.targetId === "OWNEXT")
+  assert.equal(ownExtension.canAttach, true)
+  assert.match(ownExtension.capabilityReason, /own service worker/)
+
+  // A live browser produced targets with no URL that accept the attach and then
+  // never answer Runtime.evaluate; the reason must warn instead of implying the
+  // target is a working worker.
+  const noUrl = listed.nonTabTargets.find((target) => target.targetId === "NOURL")
+  assert.equal(noUrl.canAttach, true)
+  assert.match(noUrl.capabilityReason, /never answers/)
 
   assert.match(listed.nextStepHint, /nonTabTargets have no tabId/)
 })

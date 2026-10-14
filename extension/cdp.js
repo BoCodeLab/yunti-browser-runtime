@@ -326,14 +326,38 @@ export function createCdpController({
   }
 
   // What a caller can do with a non-tab target before spending an attach on it.
-  // Only privileged chrome:// targets are refused; an extension's own
-  // chrome-extension:// worker is attachable.
+  // Chrome refuses two whole classes, both confirmed against a live browser:
+  // privileged chrome:// targets ("Cannot access a chrome:// URL") and another
+  // extension's service worker ("Cannot access a chrome-extension:// URL of
+  // different extension"). Yunti's own service worker is attachable.
   function nonTabCapability(target) {
     const url = String(target.url || "")
     if (/^chrome:\/\//i.test(url)) {
       return {
         canAttach: false,
         capabilityReason: "chrome:// targets cannot be attached through chrome.debugger",
+      }
+    }
+    if (/^chrome-extension:\/\//i.test(url)) {
+      const ownId = globalThis.chrome?.runtime?.id || ""
+      if (ownId && url.startsWith(`chrome-extension://${ownId}/`)) {
+        return {
+          canAttach: true,
+          capabilityReason: "This extension's own service worker; reachable by targetId.",
+        }
+      }
+      return {
+        canAttach: false,
+        capabilityReason: "Another extension's service worker: Chrome refuses cross-extension debugging.",
+      }
+    }
+    if (!url) {
+      // Observed on a live browser: these accept the attach and then never
+      // answer Runtime.evaluate, which costs the caller the full command
+      // timeout. Say so rather than let it look like a healthy worker.
+      return {
+        canAttach: true,
+        capabilityReason: "This target reports no URL or title, so its kind is unknown. Attaching may succeed while Runtime.evaluate never answers if the target has no JavaScript context.",
       }
     }
     return {
