@@ -312,6 +312,18 @@ test("browser interaction semantics", { skip: runE2e ? false : "set YUNTI_E2E=1 
       )
       assert.equal(workerTarget.tabId, null, "a worker target has no tab, which is the whole point")
 
+      // The inventory is the call an agent makes first. If it does not surface
+      // the worker, the target is only findable through a call the agent has no
+      // reason to know it should make.
+      const inventory = await callTool("yunti_list_browser_targets", { browserSessionId: session })
+      const listedWorker = (inventory.nonTabTargets || []).find(
+        (target) => target.targetId === workerTarget.targetId
+      )
+      assert.ok(listedWorker, `the worker is missing from the inventory: ${JSON.stringify(inventory.nonTabTargets)}`)
+      assert.equal(listedWorker.kind, "non-tab")
+      assert.equal(listedWorker.tabId, null)
+      assert.equal(listedWorker.canAttach, true)
+
       const evaluated = await callTool("yunti_cdp_send_command", {
         browserSessionId: session,
         targetId: workerTarget.targetId,

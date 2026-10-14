@@ -17,6 +17,10 @@ export function createCdpController({
   // separately because every tab-keyed code path below would key them to the
   // wrong thing.
   const cdpAttachedTargets = new Set()
+  // Non-tab attaches are held until the target disappears or the caller detaches
+  // it, so a caller walking many workers would accumulate debuggee sessions
+  // without bound. Oldest-first eviction keeps that flat.
+  const MAX_ATTACHED_TARGETS = 16
   const cdpEnabledDomains = new Map()
   const traceBuffers = new Map()
   // tabId -> { message, type, openedAt }. A native modal freezes the renderer's
@@ -321,6 +325,23 @@ export function createCdpController({
     }
   }
 
+  // What a caller can do with a non-tab target before spending an attach on it.
+  // Only privileged chrome:// targets are refused; an extension's own
+  // chrome-extension:// worker is attachable.
+  function nonTabCapability(target) {
+    const url = String(target.url || "")
+    if (/^chrome:\/\//i.test(url)) {
+      return {
+        canAttach: false,
+        capabilityReason: "chrome:// targets cannot be attached through chrome.debugger",
+      }
+    }
+    return {
+      canAttach: true,
+      capabilityReason: "Reachable by targetId through yunti_cdp_send_command; it has no tab, so do not pass a tabId for it.",
+    }
+  }
+
   async function listBrowserTargets(session) {
     const cdpResult = await interceptTargetGetTargets(session)
     const targetInfos = Array.isArray(cdpResult?.result?.targetInfos)
@@ -353,19 +374,45 @@ export function createCdpController({
           source: "Target.getTargets",
         }
       })
+    // Workers and other non-tab targets are valid CDP debuggees with no tab.
+    // They are listed separately instead of being mixed into `pages`, whose rows
+    // carry a tabId, a page handle and a page-session route that none of these
+    // have — but they must be listed, or the first call an agent makes cannot
+    // reveal a target it is able to reach.
+    const nonTabTargets = targetInfos
+      .filter((target) => target.type !== "page")
+      .map((target) => ({
+        targetId: target.targetId || "",
+        // Chrome types a dedicated worker "other", not "worker"; the value is
+        // reported verbatim rather than normalised into a guess.
+        type: target.type || "other",
+        kind: "non-tab",
+        url: target.url || "",
+        title: target.title || "",
+        tabId: null,
+        attached: Boolean(target.attached),
+        browserSessionId: session.browserSessionId,
+        routeBrowserSessionId: session.browserSessionId,
+        ...nonTabCapability(target),
+      }))
     return {
       browserSessionId: session.browserSessionId,
       routeBrowserSessionId: session.browserSessionId,
       browserInstanceId: session.browserInstanceId || session.client?.browserInstanceId || "",
       browserFamily: session.client?.family || "unknown",
       pages,
+      nonTabTargets,
       targets: targetInfos,
       targetInfos,
       pageCount: pages.length,
+      nonTabTargetCount: nonTabTargets.length,
       total: targetInfos.length,
       method: "Target.getTargets",
       source: cdpResult.intercepted ? "extension.chrome.debugger" : "extension",
       listedAt: new Date().toISOString(),
+      ...(nonTabTargets.length ? {
+        nextStepHint: "nonTabTargets have no tabId. Pass their targetId straight to yunti_cdp_send_command; the runtime attaches to the target itself.",
+      } : {}),
     }
   }
 
@@ -464,14 +511,21 @@ export function createCdpController({
   // Non-tab targets are reached with a {targetId} debuggee, kept apart from tab
   // attaches so a worker never looks like a tab.
   async function ensureNonTabTargetAttached(targetId, protocolVersion) {
-    if (cdpAttachedTargets.has(targetId)) return false
+    if (cdpAttachedTargets.has(targetId)) return { attached: false, evicted: null }
+    let evicted = null
+    while (cdpAttachedTargets.size >= MAX_ATTACHED_TARGETS) {
+      // Set iteration is insertion-ordered, so the first entry is the oldest.
+      evicted = cdpAttachedTargets.values().next().value
+      cdpAttachedTargets.delete(evicted)
+      await chromeDebuggerDetach({ targetId: evicted }).catch(() => {})
+    }
     await chromeDebuggerAttach({ targetId }, protocolVersion)
     cdpAttachedTargets.add(targetId)
-    return true
+    return { attached: true, evicted }
   }
 
   async function sendNonTabCdpCommand(session, targetId, method, params, protocolVersion) {
-    const attached = await ensureNonTabTargetAttached(targetId, protocolVersion)
+    const { attached, evicted } = await ensureNonTabTargetAttached(targetId, protocolVersion)
     const result = await chromeDebuggerSendCommand({ targetId }, method, params)
     return {
       browserSessionId: session?.browserSessionId || "",
@@ -480,6 +534,12 @@ export function createCdpController({
       targetId,
       targetKind: "non-tab",
       attached,
+      // Eviction is reported, not silent: a caller whose earlier attach was
+      // dropped has to know before assuming that target is still attached.
+      ...(evicted ? {
+        evictedTargetId: evicted,
+        nextStepHint: `Attaching here released the oldest non-tab attach (${evicted}) to keep at most ${MAX_ATTACHED_TARGETS} live. Re-attach it if you still need it.`,
+      } : {}),
       sentAt: new Date().toISOString(),
     }
   }
@@ -492,7 +552,7 @@ export function createCdpController({
       // it is a valid chrome.debugger debuggee in its own right. Only the
       // extension can attach to it, so this has to happen here.
       if (!targetId) throw new Error("Target.attachToTarget requires a targetId")
-      const attached = await ensureNonTabTargetAttached(targetId, protocolVersion)
+      const { attached, evicted } = await ensureNonTabTargetAttached(targetId, protocolVersion)
       return {
         method: "Target.attachToTarget",
         result: { sessionId: `yunti-target-${targetId}` },
@@ -501,6 +561,7 @@ export function createCdpController({
         targetKind: "non-tab",
         attached,
         reused: !attached,
+        ...(evicted ? { evictedTargetId: evicted } : {}),
         sentAt: new Date().toISOString(),
       }
     }
