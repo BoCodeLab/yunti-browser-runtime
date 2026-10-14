@@ -244,6 +244,36 @@ test("browser interaction semantics", { skip: runE2e ? false : "set YUNTI_E2E=1 
       assert.ok(Date.now() - startedAt >= 12000)
     })
 
+    await t.test("a navigation stage wait settles on the new document, not the old one", async () => {
+      // A reload keeps the same URL and the same "complete" readyState, so only
+      // the document identity proves the wait did not accept the page that was
+      // already there before the navigation was even issued.
+      const before = await callTool("yunti_evaluate_script", {
+        browserSessionId: session,
+        expression: "performance.timeOrigin",
+      })
+
+      const result = await callTool("yunti_navigate_page", {
+        browserSessionId: session,
+        action: "reload",
+        waitForStage: "load",
+        waitForTimeoutMs: 20000,
+      }, true)
+
+      assert.equal(result.navigationStage?.requested, "load")
+      assert.equal(
+        result.navigationStage?.reached,
+        true,
+        `the reload never reached "load": ${JSON.stringify(result.navigationStage)}`
+      )
+      assert.equal(result.navigationStage.readyState, "complete")
+      assert.notEqual(
+        result.navigationStage.documentTimeOrigin,
+        before.value,
+        "the wait settled on the document that was already loaded"
+      )
+    })
+
     await t.test("a native dialog does not wedge the tab", async () => {
       // The scroll subtest left the page at the bottom; bring the trigger back
       // into view before asking for its uid, otherwise the observation reports

@@ -886,7 +886,7 @@ export const TOOLS = [
   {
     name: "yunti_navigate_page",
     description:
-      "Navigate the selected browser page to a URL, reload, or go back/forward. URL/reload use browser tab APIs; back/forward prefer CDP history entries and fall back to window.history when SPA/hash history is not represented by CDP.",
+      "Navigate the selected browser page to a URL, reload, or go back/forward. URL/reload use browser tab APIs; back/forward prefer CDP history entries and fall back to window.history when SPA/hash history is not represented by CDP. Without waitForStage the call returns as soon as the browser accepts the request, so a read issued immediately after may still describe the previous document; name a stage to wait for the new document instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -896,6 +896,17 @@ export const TOOLS = [
           type: "string",
           enum: ["url", "reload", "back", "forward"],
           description: "Navigation action. Defaults to 'url'.",
+        },
+        waitForStage: {
+          type: "string",
+          enum: ["none", "commit", "domContentLoaded", "load"],
+          description: "Lifecycle stage to wait for before returning. Defaults to 'none' (return immediately). commit means the new document is in the tab; a committed document is not a loaded one, so use domContentLoaded or load before reading page content.",
+        },
+        waitForTimeoutMs: {
+          type: "integer",
+          minimum: 100,
+          maximum: 30000,
+          description: "Budget for waitForStage. Defaults to 10000. On expiry the result keeps ok:false, code NAVIGATION_STAGE_TIMEOUT and the last observed readyState, rather than reporting a navigation that never completed.",
         },
       },
     },
@@ -1336,6 +1347,21 @@ export function toolUsageHints(args = {}) {
       notes: [
         "Returns a new browserSessionId for the created tab.",
         "Use the returned browserSessionId for follow-up yunti_* calls on the new tab.",
+      ],
+    },
+    yunti_navigate_page: {
+      purpose: "Navigate the selected page to a URL, reload, or step through history.",
+      required: [],
+      recommended: ["browserSessionId", "action", "waitForStage"],
+      notes: [
+        "Without waitForStage the call returns as soon as the browser accepts the request; the new document may not have committed yet.",
+        "waitForStage=commit means the new document is in the tab; domContentLoaded and load additionally require the matching document.readyState.",
+        "The wait requires a document-identity change (performance.timeOrigin to differ), so a reload cannot be satisfied by the outgoing page's readyState.",
+        "On expiry the result is ok:false with code NAVIGATION_STAGE_TIMEOUT and the last observed readyState: a committed document is not a loaded one.",
+      ],
+      commonMistakes: [
+        "Do not read page content straight after a navigation without naming a stage, and do not treat the immediate return as proof the new page is ready.",
+        "Do not use network idleness as a stand-in for the business page being ready; observe the page for its own signal instead.",
       ],
     },
     yunti_close_page: {

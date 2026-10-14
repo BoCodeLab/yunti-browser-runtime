@@ -2,6 +2,120 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { createToolDispatcher } from "../extension/tool-handlers.js"
 
+// Navigation is issued and acknowledged before the new document exists. Naming
+// a stage must therefore wait for a real document change, and must not be
+// satisfied by the outgoing page's readyState.
+function navigationStates(entries) {
+  return entries.map((value) => ({ result: { value } }))
+}
+
+test("navigate_page without a stage keeps its immediate, non-blocking result", async () => {
+  const harness = createDispatcherHarness({
+    tabsById: { 123: { id: 123, url: "https://example.test/", status: "loading" } },
+    cdpResponses: navigationStates([{ readyState: "complete", url: "https://example.test/", timeOrigin: 1 }]),
+  })
+  try {
+    await harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, {
+      id: "nav-plain", tool: "yunti_navigate_page", arguments: { action: "url", url: "https://example.test/next" },
+    })
+    const result = harness.posted.at(-1).result
+    assert.equal(result.navigated, true)
+    assert.equal(result.navigationStage, undefined)
+    assert.equal(harness.cdpCommands.length, 0, "an unrequested stage must not attach or poll")
+    assert.deepEqual(harness.updatedTabs, [{ tabId: 123, props: { url: "https://example.test/next" } }])
+  } finally {
+    harness.restore()
+  }
+})
+
+test("navigate_page reports the lifecycle stage it actually reached", async () => {
+  const harness = createDispatcherHarness({
+    tabsById: { 123: { id: 123, url: "https://example.test/", status: "loading" } },
+    cdpResponses: navigationStates([
+      // before: the document that is on its way out
+      { readyState: "complete", url: "https://example.test/", timeOrigin: 1000 },
+      // first poll: still the outgoing document, already "complete"
+      { readyState: "complete", url: "https://example.test/", timeOrigin: 1000 },
+      // the new document commits
+      { readyState: "interactive", url: "https://example.test/next", timeOrigin: 2000 },
+      // and finishes loading
+      { readyState: "complete", url: "https://example.test/next", timeOrigin: 2000 },
+    ]),
+  })
+  try {
+    await harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, {
+      id: "nav-stage", tool: "yunti_navigate_page",
+      arguments: { action: "url", url: "https://example.test/next", waitForStage: "load", waitForTimeoutMs: 5000 },
+    })
+    const result = harness.posted.at(-1).result
+    assert.equal(result.navigated, true)
+    assert.equal(result.ok, true)
+    assert.equal(result.actionStatus, "navigation_complete")
+    assert.equal(result.navigationStage.requested, "load")
+    assert.equal(result.navigationStage.reached, true)
+    assert.equal(result.navigationStage.readyState, "complete")
+    assert.equal(result.navigationStage.url, "https://example.test/next")
+    assert.ok(result.navigationStage.waitedMs >= 0)
+  } finally {
+    harness.restore()
+  }
+})
+
+test("navigate_page reports an unreached stage instead of claiming the navigation worked", async () => {
+  const harness = createDispatcherHarness({
+    tabsById: { 123: { id: 123, url: "https://example.test/", status: "loading" } },
+    // Only the outgoing document is ever observable, so the wait must expire.
+    cdpResponses: navigationStates([
+      { readyState: "complete", url: "https://example.test/", timeOrigin: 1000 },
+      { readyState: "complete", url: "https://example.test/", timeOrigin: 1000 },
+    ]),
+  })
+  try {
+    await harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, {
+      id: "nav-timeout", tool: "yunti_navigate_page",
+      arguments: { action: "url", url: "https://example.test/next", waitForStage: "load", waitForTimeoutMs: 200 },
+    })
+    const result = harness.posted.at(-1).result
+    assert.equal(result.navigated, true, "the request was still issued")
+    assert.equal(result.ok, false)
+    assert.equal(result.code, "NAVIGATION_STAGE_TIMEOUT")
+    assert.equal(result.recoverable, true)
+    assert.equal(result.navigationStage.reached, false)
+    assert.match(result.nextStepHint, /Observe the current page/)
+  } finally {
+    harness.restore()
+  }
+})
+
+test("a reload is not satisfied by the outgoing page's readyState", async () => {
+  const harness = createDispatcherHarness({
+    tabsById: { 123: { id: 123, url: "https://example.test/", status: "complete" } },
+    cdpResponses: navigationStates([
+      { readyState: "complete", url: "https://example.test/", timeOrigin: 1000 },
+      { readyState: "complete", url: "https://example.test/", timeOrigin: 1000 },
+      { readyState: "loading", url: "https://example.test/", timeOrigin: 2000 },
+      { readyState: "complete", url: "https://example.test/", timeOrigin: 2000 },
+    ]),
+  })
+  try {
+    await harness.dispatcher.executeToolRequest(123, { browserSessionId: "page", tabId: 123 }, {
+      id: "nav-reload", tool: "yunti_navigate_page",
+      arguments: { action: "reload", waitForStage: "domContentLoaded", waitForTimeoutMs: 5000 },
+    })
+    const result = harness.posted.at(-1).result
+    assert.equal(result.ok, true)
+    assert.equal(result.navigationStage.reached, true)
+    assert.equal(result.navigationStage.readyState, "complete")
+    // The reload keeps the same URL and the same "complete" readyState, so only
+    // the document identity proves the wait settled on the new document rather
+    // than accepting the outgoing one on the first poll.
+    assert.equal(result.navigationStage.documentTimeOrigin, 2000)
+    assert.deepEqual(harness.updatedTabs, [{ tabId: 123, props: { reload: true } }])
+  } finally {
+    harness.restore()
+  }
+})
+
 test("evaluate reports serialized completeness without returning broken JSON", async () => {
   for (const value of [{ rows: "a".repeat(150) }, Array(20).fill({ name: "data" }), "a".repeat(150)]) {
     const harness = createDispatcherHarness({ cdpResponses: [{ result: { type: typeof value, value } }] })
@@ -126,6 +240,7 @@ const posted = []
 const sentMessages = []
 const cdpCommands = []
 const cdpDispatches = []
+const updatedTabs = []
 const ensureRegistrationCalls = []
 const cdpResponses = options.cdpResponses ? [...options.cdpResponses] : null
   const defaultContentToolResponses = {
@@ -198,6 +313,13 @@ const cdpResponses = options.cdpResponses ? [...options.cdpResponses] : null
         status: "complete",
       },
       get: async (tabId) => options.tabsById?.[tabId] || null,
+      update: async (tabId, props) => {
+        updatedTabs.push({ tabId, props })
+        return options.tabsById?.[tabId] || { id: tabId }
+      },
+      reload: async (tabId) => {
+        updatedTabs.push({ tabId, props: { reload: true } })
+      },
       query: async () => options.activeTab ? [options.activeTab] : [],
       sendMessage: async (tabId, message) => {
         sentMessages.push({ tabId, message })
@@ -273,6 +395,7 @@ const cdpResponses = options.cdpResponses ? [...options.cdpResponses] : null
       globalThis.chrome = originalChrome
     },
     sentMessages,
+    updatedTabs,
   }
 }
 

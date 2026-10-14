@@ -575,13 +575,119 @@ export function createToolDispatcher({
     return /^\d+$/.test(targetId) ? normalizeTabId(targetId) : null
   }
   
+  // Navigation returns as soon as the browser accepts the request, so a
+  // screenshot, observation or evaluate issued straight after can still
+  // describe the document that was there before. Naming a stage turns that
+  // race into a bounded wait and reports how far the load actually got. The
+  // default stays "none": navigation must not become a blocking call for
+  // callers that never asked for one.
+  const NAVIGATION_STAGES = new Set(["none", "commit", "domContentLoaded", "load"])
+  const NAVIGATION_READY_STATES = {
+    domContentLoaded: ["interactive", "complete"],
+    load: ["complete"],
+  }
+
+  function normalizeNavigationStage(value) {
+    const stage = String(value || "none").trim()
+    return NAVIGATION_STAGES.has(stage) ? stage : "none"
+  }
+
+  async function readNavigationState(tabId) {
+    try {
+      const evaluated = await chromeDebuggerSendCommand(
+        { tabId },
+        "Runtime.evaluate",
+        { expression: "({ readyState: document.readyState, url: location.href, timeOrigin: performance.timeOrigin })", returnByValue: true }
+      )
+      const value = evaluated?.result?.value
+      if (value && typeof value === "object") return value
+    } catch {
+      // The execution context is torn down mid-navigation and comes back with
+      // the new document; a failed read here is expected, not an error.
+    }
+    return null
+  }
+
+  /// Settles once the requested stage is reached, or reports honestly that it
+  /// was not reached within the budget rather than waiting forever.
+  async function waitForNavigationStage(tabId, stage, expectedUrl, timeoutMs, beforeTimeOrigin) {
+    const startedAt = Date.now()
+    const deadline = startedAt + timeoutMs
+    let last = null
+    while (Date.now() < deadline) {
+      const state = await readNavigationState(tabId)
+      if (state) {
+        last = state
+        const onTarget = !expectedUrl || state.url === expectedUrl || state.url.startsWith(expectedUrl)
+        // A reload leaves document.readyState at "complete" from the outgoing
+        // page, so a stage check without a document-identity change would
+        // return immediately and describe the page that is on its way out.
+        // performance.timeOrigin changes with each new document.
+        const newDocument = beforeTimeOrigin === null || beforeTimeOrigin === undefined
+          || (typeof state.timeOrigin === "number" && state.timeOrigin !== beforeTimeOrigin)
+        if (onTarget && newDocument) {
+          if (stage === "commit") return { reached: true, state, waitedMs: Date.now() - startedAt }
+          if (NAVIGATION_READY_STATES[stage]?.includes(state.readyState)) {
+            return { reached: true, state, waitedMs: Date.now() - startedAt }
+          }
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 120))
+    }
+    return { reached: false, state: last, waitedMs: Date.now() - startedAt }
+  }
+
+  async function finishNavigation(tabId, session, result, args = {}, beforeState = null) {
+    const stage = normalizeNavigationStage(args.waitForStage)
+    if (stage === "none") return result
+    const raw = Number(args.waitForTimeoutMs)
+    const timeoutMs = Number.isFinite(raw) ? Math.max(100, Math.min(Math.floor(raw), 30000)) : 10000
+    const expectedUrl = String(result.url || "")
+    const waited = await waitForNavigationStage(
+      tabId, stage, expectedUrl, timeoutMs, beforeState?.timeOrigin ?? null
+    )
+    return {
+      ...result,
+      ok: waited.reached,
+      actionStatus: waited.reached ? "navigation_complete" : "navigation_incomplete",
+      navigationStage: {
+        requested: stage,
+        reached: waited.reached,
+        readyState: waited.state?.readyState || "",
+        url: waited.state?.url || "",
+        // Document identity. Two documents can share a URL and a readyState —
+        // a reload proves it — so this is what tells a caller it settled on the
+        // document it asked for and not the one on its way out.
+        documentTimeOrigin: typeof waited.state?.timeOrigin === "number" ? waited.state.timeOrigin : null,
+        waitedMs: waited.waitedMs,
+        timeoutMs,
+      },
+      ...(waited.reached ? {} : {
+        recoverable: true,
+        code: "NAVIGATION_STAGE_TIMEOUT",
+        nextStepHint: `The page did not reach ${stage} within ${timeoutMs} ms. Observe the current page before assuming the navigation succeeded; a committed document is not a loaded one.`,
+      }),
+    }
+  }
+
   async function navigatePage(tabId, session, args = {}) {
     const action = String(args.action || "url").trim()
     const url = String(args.url || "").trim()
-  
+
+    // Capture the outgoing document before the request is issued, so a stage
+    // wait can require an actual document change instead of trusting a
+    // readyState that still describes the page being replaced.
+    let beforeState = null
+    if (normalizeNavigationStage(args.waitForStage) !== "none") {
+      await ensureCdpAttached(tabId, "1.3")
+      beforeState = await readNavigationState(tabId)
+    }
+
     if (action === "reload") {
       await chrome.tabs.reload(tabId)
-      return { navigated: true, action: "reload", tabId, browserSessionId: session.browserSessionId }
+      return finishNavigation(tabId, session, {
+        navigated: true, action: "reload", tabId, url: beforeState?.url || "", browserSessionId: session.browserSessionId,
+      }, args, beforeState)
     }
   
     if (action === "back" || action === "forward") {
@@ -618,14 +724,14 @@ export function createToolDispatcher({
           "Page.navigateToHistoryEntry",
           { entryId: entries[targetIndex].id }
         )
-        return {
+        return finishNavigation(tabId, session, {
           navigated: true,
           action,
           tabId,
           url: entries[targetIndex].url,
           browserSessionId: session.browserSessionId,
           method: "Page.navigateToHistoryEntry",
-        }
+        }, args, beforeState)
       } catch (error) {
         return navigateHistoryViaRuntime(
           tabId,
@@ -639,7 +745,9 @@ export function createToolDispatcher({
     // action === "url" (default)
     if (!url) throw new Error("url is required for navigate action 'url'")
     await chrome.tabs.update(tabId, { url })
-    return { navigated: true, action: "url", url, tabId, browserSessionId: session.browserSessionId }
+    return finishNavigation(tabId, session, {
+      navigated: true, action: "url", url, tabId, browserSessionId: session.browserSessionId,
+    }, args, beforeState)
   }
   
   async function navigateHistoryViaRuntime(tabId, session, action, reason) {
