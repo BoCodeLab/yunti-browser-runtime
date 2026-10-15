@@ -1,5 +1,31 @@
 # Project Status
 
+## Local Chromium Endurance Acceptance (2026-10-15, 0.2.9)
+
+The current checkout passed the qualifying soak on Chromium 153.0.8010.12
+with an isolated profile, Bridge, memory directory, and local fixtures. The
+runner now copies the extension and binds its default Bridge before the worker
+starts, preventing an initial connection to the user's active Bridge.
+
+- Elapsed: 900.889 seconds; 708 complete continuous cycles.
+- Calls: 18,902 successful out of 18,902; public tool coverage: 54/54.
+- Accepted guarded writes: 708; duplicate write attempts: 0.
+- Stale-route recoveries: 708; child tabs created and closed: 237;
+  CDP detach/reattach recoveries: 178.
+- Call latency p50/p95/p99/max: 9/312/444/2,101 ms; 6 calls exceeded one second.
+  Both latency gates passed: p95 <= 500 ms and max <= 10,000 ms.
+- Independent verification recomputed coverage and latency from every operation,
+  checked writes against completed cycles, and verified that all 33 source
+  fingerprints stayed unchanged during the run.
+- Dedicated real-browser checks: interactions 11 passed and smoke 1 passed,
+  both with zero failures and zero skips. The complete `YUNTI_E2E=1` suite
+  passed 305 tests with zero failures and zero skips.
+
+Raw evidence is retained under
+`.artifacts/local-endurance-20261015/qualifying/2026-10-15T02-52-14-776Z/`.
+The 60-second preflight is separate and does not qualify as endurance evidence.
+This record covers local fixture acceptance of the checkout's 0.2.9 candidate.
+
 ## P0-P2 Gate And Contract Hardening
 
 The active slice hardens the release gates and the failure contract. It is
@@ -1487,7 +1513,7 @@ Latest detailed P6.2 status:
   `https://registry.npmjs.org/`, and `release:publish` runs it before
   `npm publish`.
 - Latest P4.17 validation: after npm login, `npm run release:whoami` succeeds
-  against `https://registry.npmjs.org/` and reports account `xuanzhu`.
+  against `https://registry.npmjs.org/` and confirms the publishing identity.
 - P4.18 post-publish verification command is complete:
   `release:verify-published` checks the published npm package name, version,
   repository, homepage, bugs URL, and tarball URL against local `package.json`.
@@ -1505,12 +1531,12 @@ Latest detailed P6.2 status:
   passing the full local release gate, but npm returned the same `E403`; the
   token does not satisfy npm's publish-time bypass 2FA requirement.
 - A project-local `.npmrc` retry with the actual token also authenticated
-  successfully as `xuanzhu`, then failed at `npm publish` with the same `E403`;
+  successfully, then failed at `npm publish` with the same `E403`;
   `.npmrc` is ignored by git to avoid committing local npm credentials.
 - A second npm token written to the project-local `.npmrc` also authenticated
-  successfully as `xuanzhu`, then failed at `npm publish` with the same `E403`.
+  successfully, then failed at `npm publish` with the same `E403`.
 - A publish-capable npm token written to the project-local `.npmrc` authenticated
-  successfully as `xuanzhu`; `npm run release:publish` then succeeded, followed
+  successfully; `npm run release:publish` then succeeded, followed
   by successful `npm run release:verify-published`.
 - P5.1 local default auth simplification is complete: default `127.0.0.1`
   bridge usage no longer needs a token; explicit `YUNTI_BROWSER_BRIDGE_TOKEN`

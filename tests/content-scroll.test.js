@@ -394,7 +394,8 @@ test("content coordinate actions pierce open shadow roots", () => {
   assert.equal(result.element.selector, "#shadow-action")
 })
 
-test("content click selector auto-waits for element appearance", async () => {
+test("content click selector auto-waits for element appearance", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] })
   const button = new FakeElement("button", { id: "menu" }, { innerText: "Open menu" })
   let ready = false
   const context = createContentHarness()
@@ -402,14 +403,17 @@ test("content click selector auto-waits for element appearance", async () => {
   context.document.elementFromPoint = () => ready ? button : null
   setTimeout(() => { ready = true }, 50)
 
-  const result = await context.clickElement({ selector: "#menu", timeoutMs: 250 })
+  const pending = context.clickElement({ selector: "#menu", timeoutMs: 250 })
+  t.mock.timers.tick(100)
+  const result = await pending
 
   assert.equal(result.clicked, true)
   assert.equal(result.element.selector, "#menu")
-  assert.ok(result.actionability.waitedMs >= 0)
+  assert.equal(result.actionability.waitedMs, 100)
 })
 
-test("content fill selector auto-waits for disabled target to become enabled", async () => {
+test("content fill selector auto-waits for disabled target to become enabled", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] })
   const input = new FakeElement("input", { id: "name" }, {
     rect: { x: 20, y: 20, width: 180, height: 32 },
   })
@@ -420,12 +424,14 @@ test("content fill selector auto-waits for disabled target to become enabled", a
   context.document.elementFromPoint = () => input
   setTimeout(() => { input.disabled = false }, 50)
 
-  const result = await context.fillElement({ selector: "#name", value: "Yunti", timeoutMs: 250 })
+  const pending = context.fillElement({ selector: "#name", value: "Yunti", timeoutMs: 250 })
+  t.mock.timers.tick(100)
+  const result = await pending
 
   assert.equal(result.filled, true)
   assert.equal(result.valueApplied, true)
   assert.equal(input.value, "Yunti")
-  assert.ok(result.actionability.waitedMs >= 0)
+  assert.equal(result.actionability.waitedMs, 100)
 })
 
 test("content click selector returns structured actionability timeout", async () => {

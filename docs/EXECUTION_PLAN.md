@@ -1119,15 +1119,9 @@ Extension：
   `curl -I -L https://github.com/yunti-ai/yunti-browser-runtime/issues` 返回 HTTP 404。
 - 已检查 npm registry：
   `npm view yunti-browser-runtime version --json` 返回 E404，说明包名当前未发布或不可见。
-- 已收到新的 GitHub SSH 远端：
-  `git@github.com:dingguangyi0/yunti-browser-runtime.git`。
-- 已通过 `git ls-remote` 确认该 SSH 远端当前账号可访问。
-- 已将 `package.json` 发布 metadata 切换到：
-  `repository=git+https://github.com/dingguangyi0/yunti-browser-runtime.git`、
-  `homepage=https://github.com/dingguangyi0/yunti-browser-runtime#readme`、
-  `bugs=https://github.com/dingguangyi0/yunti-browser-runtime/issues`。
-- 已修正 `scripts/release-check.js` 的公开文档残留门禁：允许正式公开 GitHub
-  owner `dingguangyi0`，继续拦截本机路径和内部残留词。
+- 已通过 `git ls-remote` 确认项目远端可访问；仓库迁移后，`package.json` 的
+  repository、homepage、bugs metadata 已统一指向当前公开组织仓库。
+- 公开文档残留门禁保留正式项目仓库信息，继续拦截本机路径和内部残留词。
 - 已增强 `scripts/check-package-metadata.js`：repository/homepage/bugs 的 HEAD
   请求遇到 TLS 断连或 5xx 等临时网络失败时会重试，避免 GitHub 瞬时网络抖动误挡发布。
 - `scripts/check-package-metadata.js` 会在 homepage 去掉锚点后与 repository URL
@@ -1153,9 +1147,8 @@ Extension：
 当前结论：
 
 - P4.3 已完成：`package.json` 的 repository/homepage/bugs metadata 指向
-  `https://github.com/BoCodeLab/yunti-browser-runtime`，且公开可达。该仓库最初
-  发布在 `dingguangyi0` 账号下，现已迁到 `BoCodeLab` 组织，metadata 与
-  `origin` 保持一致。
+  `https://github.com/BoCodeLab/yunti-browser-runtime`，且公开可达。仓库已迁到
+  `BoCodeLab` 组织，metadata 与 `origin` 保持一致。
 - npm 包名 `yunti-browser-runtime` 当前未发布；作为 `0.1.0` 首次发布状态已被接受。
 - 发布前最后保留 `npm publish --dry-run` 和人工发布确认。
 
@@ -1676,7 +1669,7 @@ release gate、npm package 内容检查和 extension zip 内容检查。
 
 - 发布前，`npm run release:whoami` 曾在未登录状态返回 `ENEEDAUTH`，验证缺少 npm
   登录时会提前失败。
-- 登录后，`npm run release:whoami` 返回 `xuanzhu`，并在正式发布前通过预检。
+- 登录后，`npm run release:whoami` 成功确认发布身份，并在正式发布前通过预检。
 - `release:publish` 已内置登录预检；登录前不会进入正式 npm publish。
 
 ## P4.18 npm 发布后验证命令
@@ -1727,7 +1720,7 @@ metadata 与当前 `package.json` 一致。
 
 执行摘要：
 
-- `npm run release:whoami` 已确认当前官方 npm registry 登录账号为 `xuanzhu`。
+- `npm run release:whoami` 已确认当前官方 npm registry 的发布身份。
 - 已按用户确认执行 `npm run release:publish`。
 - `release:publish` 已通过内置 `release:prepublish`、`release:whoami` 和全部本地
   发布门禁；本次测试覆盖 59 项，58 项通过，1 项真实浏览器 smoke 按配置跳过。
@@ -1738,9 +1731,9 @@ metadata 与当前 `package.json` 一致。
 - 已使用临时 npm token 重试 `npm run release:publish`；本地发布门禁再次通过，但
   npm registry 仍返回相同 `E403`，说明该 token 不能绕过发布 2FA 要求。
 - 已按项目根目录 `.npmrc` 方式写入实际 token 并确认 `.npmrc` 被 `.gitignore`
-  忽略；`npm whoami --registry=https://registry.npmjs.org/` 返回 `xuanzhu`，
+  忽略；`npm whoami --registry=https://registry.npmjs.org/` 成功确认发布身份，
   但重新执行 `npm run release:publish` 仍在 `npm publish` 阶段返回相同 `E403`。
-- 已用新的 npm token 覆盖项目级 `.npmrc` 后再次确认 `npm whoami` 返回 `xuanzhu`；
+- 已用新的 npm token 覆盖项目级 `.npmrc` 后再次确认 `npm whoami` 成功；
   `npm run release:publish` 仍通过本地门禁并在 `npm publish` 阶段返回相同 `E403`。
 - 已用具备发布权限的 npm token 覆盖项目级 `.npmrc` 后再次执行
   `npm run release:publish`，正式发布成功：`yunti-browser-runtime@0.1.0` 已发布到

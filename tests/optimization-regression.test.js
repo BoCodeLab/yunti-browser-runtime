@@ -866,7 +866,8 @@ test("controller registration is throttled across poll cycles", async () => {
 // ---------------------------------------------------------------------------
 // 8. CDP command timeout + forced re-attach
 // ---------------------------------------------------------------------------
-test("CDP command timeout rejects with YUNTI_CDP_TIMEOUT and forces a re-attach", async () => {
+test("CDP command timeout rejects with YUNTI_CDP_TIMEOUT and forces a re-attach", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] })
   const attachCalls = []
   const previousChrome = globalThis.chrome
   globalThis.chrome = {
@@ -896,8 +897,11 @@ test("CDP command timeout rejects with YUNTI_CDP_TIMEOUT and forces a re-attach"
     assert.equal(first.reused, false)
 
     const started = Date.now()
-    await assert.rejects(
-      cdp.chromeDebuggerSendCommand({ tabId: 1 }, "Page.captureScreenshot", { format: "png" }),
+    const command = cdp.chromeDebuggerSendCommand({ tabId: 1 }, "Page.captureScreenshot", { format: "png" })
+    let settled = false
+    command.then(() => { settled = true }, () => { settled = true })
+    const rejection = assert.rejects(
+      command,
       (error) => {
         assert.match(error.message, /YUNTI_CDP_TIMEOUT/)
         assert.match(error.message, /Page\.captureScreenshot/)
@@ -907,13 +911,14 @@ test("CDP command timeout rejects with YUNTI_CDP_TIMEOUT and forces a re-attach"
         return true
       }
     )
+    t.mock.timers.tick(249)
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.equal(settled, false, "CDP command must remain pending before its deadline")
+    t.mock.timers.tick(1)
+    await rejection
     const elapsedMs = Date.now() - started
-    // cdp.js floors the configured budget at 250ms, so the rejection must land
-    // on that order of magnitude instead of the 10s default.
-    assert.ok(
-      elapsedMs >= 200 && elapsedMs <= 900,
-      `CDP timeout must fire on the configured 250ms budget, got ${elapsedMs}ms`
-    )
+    assert.equal(elapsedMs, 250, "CDP timeout must use the configured budget")
 
     // The timed-out debugger session is no longer trusted: the next call must
     // re-attach instead of reusing dead bookkeeping.

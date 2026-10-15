@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
-import { access, appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { access, appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -52,13 +52,20 @@ async function main() {
   let failure = null
 
   try {
+    const runtimeExtensionDir = join(profileDir, "fixture-extension")
+    await cp(extensionDir, runtimeExtensionDir, { recursive: true })
+    const settingsPath = join(runtimeExtensionDir, "settings.js")
+    const settings = await readFile(settingsPath, "utf8")
+    const isolatedSettings = settings.replace(/export const DEFAULT_BRIDGE_URL = "[^"]+"/, `export const DEFAULT_BRIDGE_URL = ${JSON.stringify(bridgeUrl)}`)
+    assert.notEqual(isolatedSettings, settings, "The soak extension must connect only to its isolated Bridge")
+    await writeFile(settingsPath, isolatedSettings)
     context = await playwright.chromium.launchPersistentContext(profileDir, {
       headless: false,
       executablePath,
       viewport: { width: 1280, height: 900 },
       args: [
-        `--disable-extensions-except=${extensionDir}`,
-        `--load-extension=${extensionDir}`,
+        `--disable-extensions-except=${runtimeExtensionDir}`,
+        `--load-extension=${runtimeExtensionDir}`,
         "--no-first-run",
         "--no-default-browser-check",
       ],
@@ -739,7 +746,12 @@ function summarizeResult(result) {
     bytes: Buffer.byteLength(serialized, "utf8"),
     keys: typeof result === "object" && !Array.isArray(result) ? Object.keys(result).slice(0, 20) : [],
   }
-  for (const key of ["ok", "code", "browserSessionId", "action", "method", "total", "returned", "elementCount"]) {
+  // waitedMs is the tool's own timer, and it is the only field that separates
+  // "the wait itself took this long" from "the round trip took this long".
+  // Without it a max-latency breach cannot be attributed: a 20 s wait_for looks
+  // identical whether the extension waited 20 s or the request sat in transport
+  // and then waited 200 ms.
+  for (const key of ["ok", "code", "browserSessionId", "action", "method", "total", "returned", "elementCount", "waitedMs"]) {
     if (result?.[key] !== undefined) summary[key] = result[key]
   }
   return summary

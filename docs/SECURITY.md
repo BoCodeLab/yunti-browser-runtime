@@ -13,6 +13,11 @@ The first release is local single-user software:
 - MCP tools default to `userId=local`;
 - no remote relay is part of the documented install path.
 
+Tool results are delivered to the connected MCP client. Its model provider,
+telemetry, retention, and logging settings are outside Yunti's local transport
+boundary. A local Bridge does not mean the connected agent processes data only
+on this machine.
+
 ## Data Handling
 
 - Cookies and raw authorization headers are not returned by network tools.
@@ -28,6 +33,9 @@ The first release is local single-user software:
 - Raw CDP event diagnostics are an explicit low-level exception: payloads are
   not redacted, are cached only in memory, and should be cleared after debugging
   with `yunti_clear_cdp_events`.
+- Raw CDP commands, script evaluation values, and performance traces may also
+  contain unredacted page data. Redaction is heuristic and does not guarantee
+  that every credential or sensitive value is recognized.
 - Screenshot tools return real visible pixels. They do not inherit DOM
   redaction and should be used only when visual evidence is needed.
 - The content script does not call product-specific login APIs.
@@ -41,6 +49,8 @@ The extension uses browser permissions required for automation:
 - `scripting` for on-demand content-script recovery and stylesheet injection;
 - `storage` for local bridge URL, optional token, user, and page-match settings;
 - `webRequest` for sanitized network observations;
+- `downloads` for download inventory and completion diagnostics; current tools
+  do not redirect downloads or read downloaded file contents;
 - `activeTab` for visible-tab capture fallback paths;
 - `alarms` for the periodic browser-controller bridge recovery heartbeat.
 
@@ -69,8 +79,9 @@ Users should only load the extension from a trusted local checkout.
 
 - The runtime is local-first and does not send browser observations to a Yunti
   hosted service.
-- Raw cookies, authorization headers, passwords, and token-like fields are not
-  returned by the documented tools.
+- Network tools filter cookies, authorization headers, and common sensitive
+  fields. This filtering does not apply to arbitrary script results, raw CDP
+  responses, or screenshot pixels.
 - Console diagnostics and learning memory use shared sanitization for likely
   Bearer tokens, JWTs, private keys, long token-like values, emails, phones,
   Luhn-valid payment-card-like values, and address-like text.
@@ -83,6 +94,18 @@ Users should only load the extension from a trusted local checkout.
 - Screenshot artifacts may contain all visible sensitive page content; prefer
   structured redacted observations when text/state is enough.
 - Agents should summarize sensitive-looking output instead of repeating it.
+
+## Repository Hygiene
+
+- Keep local credentials, npm configuration, private keys, browser profiles,
+  diagnostic logs, and screenshots out of commits and release archives.
+- `.gitignore` excludes common local credential files and generated artifacts;
+  it does not protect files that were already tracked or force-added.
+- Before publishing, scan the working tree, reachable Git history, and the
+  actual package contents with a secret scanner. Review matches without
+  copying raw credential values into issues or public reports.
+- If a real secret was committed, revoke or rotate it with its issuer. Removing
+  it from the latest file does not remove it from Git history.
 
 ## Not Yet Implemented
 

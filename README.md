@@ -2,146 +2,105 @@
 
 # Yunti Browser Runtime
 
-**让 AI Agent 稳定操作你正在使用的 Chrome / Edge。**
+**让 AI Agent 操作你本机已登录的 Chrome / Edge。**
 
-本地优先 · MCP 原生 · Content Script + CDP 双通道 · 无远程账号依赖
+本地 Bridge · 标准 MCP · Content Script + CDP · 无需 Yunti 平台账号
 
-[![install](https://img.shields.io/badge/install-from%20GitHub%20source-2ea44f)](docs/INSTALL.md)
+[![Release](https://img.shields.io/github/v/release/BoCodeLab/yunti-browser-runtime)](https://github.com/BoCodeLab/yunti-browser-runtime/releases/latest)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=node.js&logoColor=white)](package.json)
 [![MCP](https://img.shields.io/badge/MCP-54_tools-111111)](docs/TOOL_GUIDE.md)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
-[首次安装](#快速开始首次安装) · [更新](#更新已安装的版本) · [核心能力](#核心能力) · [工作原理](#工作原理) · [交给-agent-安装或更新](#交给-agent-安装或更新) · [文档](#文档导航)
+[快速开始](#快速开始) · [更新](#更新) · [交给-agent-安装或更新](#交给-agent-安装或更新) · [安全与隐私](#安全与隐私) · [开发与验证](#开发与验证) · [文档](#文档)
 
 </div>
 
-Yunti Browser Runtime 是一个面向 MCP Agent 的本地浏览器运行时。它把 Agent、
-本地 Bridge 和浏览器扩展连接起来，让 Codex、Claude Code、Cursor、Cline 等工具
-能够观察和操作用户真实浏览器中的页面。
+Yunti 把 Codex、Claude Code、Cursor、Cline 等 MCP Agent 连接到本机浏览器。
+Agent 可以读取页面、定位元素、填写表单、管理标签页，并通过截图、网络和控制台诊断验证结果。
+你可以继续使用自己的浏览器与登录状态，运行时不要求把会话复制到远程浏览器。
 
-> English: A local-first MCP browser runtime that lets AI agents inspect and
-> operate the user's existing Chromium browser through a local bridge and
-> extension, with no hosted account or remote browser required.
+> English: A local MCP runtime for AI agents to inspect and operate existing
+> Chrome / Edge sessions, with DOM actions, CDP, explicit routing, and verifiable results.
 
-## 为什么是 Yunti
-
-很多浏览器自动化方案需要启动一套独立浏览器、上传会话到云端，或要求 Agent 自己
-处理易失效的页面选择器。Yunti 选择另一条路径：让 Agent 安全接入用户已经登录、
-已经打开的本地浏览器，同时把页面恢复和执行诊断做成运行时能力。
-
-| 关注点 | Yunti 的选择 |
+| 能力 | 行为 |
 | --- | --- |
-| 浏览器 | 操作用户本机 Chrome / Edge 和已有登录状态 |
-| 接入协议 | 标准 MCP，和具体 Agent 平台解耦 |
-| 操作后端 | Content Script 与 Chrome DevTools Protocol 都是一等能力 |
-| 页面定位 | observe → fresh uid → action → verify，并保留 selector / coordinate / CDP 回退 |
-| 会话稳定性 | 每个浏览器实例一条 controller 通道，旧 session、睡眠标签和 MV3 恢复由 runtime 处理 |
-| 数据边界 | Bridge 默认只监听 `127.0.0.1`，无远程服务、无平台账号、默认无 token |
-| Agent 行为 | 结构化错误、共享重试预算、写操作不确定性与恢复建议 |
+| 页面观察 | 可交互 DOM、轻量快照、完整快照、同源 iframe、开放 Shadow DOM |
+| 元素操作 | 点击、输入、选择、按键、滚动、拖拽、上传；使用最新观察中的 uid |
+| 浏览器管理 | 多浏览器与多 profile、标签页创建／切换／关闭、导航、设备仿真 |
+| 结果验证 | 页面状态、截图、网络请求、控制台、性能 trace、下载记录 |
+| 动态页面恢复 | 保留节点身份、检查可操作性、恢复页面路由、处理睡眠标签页 |
+| 失败契约 | 明确错误码、共享重试预算；不确定的写操作要求先核对页面状态 |
 
-### 0.2.9 可靠性修复、大结果导出与下载报告
+## 当前版本与实测
 
-`0.2.9` 落实 2026-10 使用审计的 14 项必须修复项，重点消除三类**会产生错误证据**的缺陷：
-观察 uid 绑定真实节点（不再可能点中另一个元素）、诊断工具显式拒绝不支持的页面路由
-（不再静默取错页）、超长结果保持 JSON 合法并如实标注截断。同时新增两个高层能力——
-`yunti_read_result_chunk` 分块读取超长结果（带 sha256 可校验拼接完整性），
-`yunti_list_downloads` 报告下载落点与状态。工具数 52 → 54。
+GitHub 最新发布版为 [v0.2.9](https://github.com/BoCodeLab/yunti-browser-runtime/releases/tag/v0.2.9)。
+本版本提供 54 个工具，包含超长结果分块读取、下载落点与状态报告，以及 UID、
+诊断路由、超时预算和结果完整性修复。升级时请留意新增的 `downloads` 权限。
 
-**升级注意**：本版本新增 `downloads` 权限（只读，不接管下载），重新加载扩展时浏览器会
-提示确认；`yunti_navigate_page` 新增可选的 `waitForStage`，默认行为不变。
-详细说明见 [0.2.9 发布说明](docs/RELEASE_0_2_9.md)。
+2026-10-15 对当前工作区源码完成了独立 Chromium 端到端耐久验收：
 
-### 0.2.8 源码安装与并发/延迟优化
+| 验收项 | 实测结果 |
+| --- | --- |
+| 连续运行 | 900.889 秒，708 个完整循环 |
+| 工具覆盖 | 54 / 54 |
+| 工具调用 | 18,902 / 18,902 成功 |
+| 写入验证 | 服务端接受 708 次，重复写入 0 次 |
+| 耗时 P50 / P95 / P99 / 最长 | 9 / 312 / 444 / 2,101 毫秒 |
+| 恢复验证 | 708 次过期路由恢复、237 次子标签页创建关闭、178 次 CDP 重连 |
+| 完整回归 | 305 通过、0 失败、0 跳过 |
 
-`0.2.8` 是第一个以 GitHub 源码安装为主路径的版本：运行时没有任何第三方依赖，克隆后
-`npm install` 可选；`npm run bridge` 在 Windows `cmd.exe` 下不再报错。同一版本并入
-上游的稳定页面句柄与结构化失败契约，并完成一轮并发/延迟优化——原生模态对话框不再
-卡死标签页、controller 注册降频、卡住的执行通道由看门狗释放并返回结构化
-`YUNTI_TAB_BUSY`。详细说明见 [0.2.8 发布说明](docs/RELEASE_0_2_8.md)。
+测试使用 Chromium 153.0.8010.12、临时 profile、独立 Bridge 和本地模拟页面。
+这些数据对应本次验证的源码，不是所有网站或既有发布 tag 的性能承诺。
+通过标准和复现方式见[耐久测试](docs/SOAK_TEST.md)，记录见[项目状态](docs/PROJECT_STATUS.md)。
 
-### 0.2.7 页面无侵入热修复
+## 快速开始
 
-`0.2.7` 移除了扩展注入业务页面的 `AI` 悬浮按钮和“刷新连接”面板。后台
-controller、自动注册、MCP 页面操作、Content Script 与 CDP 能力保持不变；连接状态
-仍可从浏览器工具栏的扩展 popup 查看。详细说明见
-[0.2.7 发布说明](docs/RELEASE_0_2_7.md)。
-
-### 0.2.6 可靠性基线
-
-`0.2.6` 用 38 个确定性复杂场景和真实 Edge 15 分钟耐久测试验证动态页面能力。
-benchmark 通过 `38/38` 场景、`114` 次尝试和 `397` 次 MCP 调用；Edge 连续运行
-`900.168` 秒，完成 `840` 个业务循环和 `22,410/22,410` 次成功工具调用，覆盖
-全部 `52/52` 个 MCP 工具，重复写入为 `0`，调用 p95 / max 为 `213 / 956 ms`。
-
-[查看耐久测试设计与完整验收标准](docs/SOAK_TEST.md)
-
-## 快速开始（首次安装）
+需要 **Node.js 22+**、Git，以及 Chrome 或 Edge。当前推荐从 GitHub 源码安装。
 
 ### 1. 获取源码
 
-克隆仓库到固定目录后直接使用，不需要 npm 账号，浏览器扩展目录就在仓库内。要求
-Node.js 22 或更高版本：
+在你选择的固定目录执行：
 
 ```bash
 git clone https://github.com/BoCodeLab/yunti-browser-runtime.git
 cd yunti-browser-runtime
 git checkout v0.2.9
-npm install
 ```
 
-想跟随开发版就跳过 `git checkout`，直接留在 `main` 分支（会包含尚未发布的改动）。
-检出 tag 后处于 detached HEAD 状态，这是正常的，更新时 checkout 新的 tag 即可。
+希望跟随开发版时可保留 `main`；发布 tag 提供固定版本。
+没有 Git 也可以从 [Releases](https://github.com/BoCodeLab/yunti-browser-runtime/releases)
+下载对应版本的 `Source code (zip)`，解压到固定目录。
 
-没有安装 git 时，可以从 [Releases](https://github.com/BoCodeLab/yunti-browser-runtime/releases)
-页下载 `Source code (zip)` 解压，内容与克隆完全一致。
+运行时没有第三方运行依赖，日常使用可以跳过 `npm install`。
+开发和真实浏览器测试需要安装开发依赖，见[开发与验证](#开发与验证)。
+源码安装不会注册全局命令，下列 Node 命令可直接用于 PowerShell、cmd、macOS 和 Linux。
 
-请把仓库放在一个固定位置（例如 Windows 的 `D:\tools\yunti-browser-runtime`，或
-macOS / Linux 的 `~/tools/yunti-browser-runtime`），不要放进临时目录。下一步生成的
-MCP 配置会写入该目录的绝对路径，目录被移动或删除后需要重新生成配置。
+### 2. 接入 Agent，并安装 skill
 
-`npm install` 这一步是可选的：运行时（MCP server、本地 Bridge、CLI、浏览器扩展）
-没有任何第三方依赖，跳过也能正常使用；装上的 `playwright-core` 只服务于真实浏览器
-E2E 与耐久测试。
-
-源码安装不会注册全局命令，本节及后续所有命令统一使用 `npm run <命令>` 形式。
-各 Agent 的详细接入配置与故障恢复见[安装指南](docs/INSTALL.md)。
-
-### 2. 接入你的 Agent
-
-让 CLI 针对 Agent 生成 MCP 配置和 skill 安装指引：
+以 Codex 为例，在仓库目录执行：
 
 ```bash
-npm run print-config -- --agent codex --human
+node scripts/print-config.js --agent codex --human
+node scripts/install-skill.js --harness codex
 ```
 
-支持的 `--agent` 示例：`codex`、`claude-code`、`cursor`、`cline`。把输出的 MCP
-配置加入 Agent 后，新建或重载 Agent 会话。Agent 启动 MCP server 时会自动启动
-本地 Bridge，通常不需要另开一个 `bridge` 进程。
+按输出将 MCP server 接入你的 Agent，然后新建或重载 Agent 会话。
+MCP server 会自动启动本地 Bridge，通常无需另开 `bridge` 进程。
 
-skill 也可以一条命令直接装好，不必手动复制目录：
+`--agent` 支持 `codex`、`claude-code`、`cursor`、`cline`；skill 安装还支持 `dsh`，
+其他工具可用 `--dest <技能目录>` 指定位置。目标已存在时先确认需要更新，再加 `--force`。
+不要遗漏 packaged skill 的安装或接入；它提供页面路由、共享重试预算和操作后验证规范。
 
-```bash
-npm run install-skill -- --harness codex
-```
-
-支持的 `--harness`：`codex`、`claude-code`、`cursor`、`cline`、`dsh`。用
-`--dest <目录>` 可以装到任意位置，`--dry-run` 只报告将要做什么、不写磁盘，
-目标已存在时会拒绝覆盖，需要 `--force`。
+不同 Agent 的配置格式和接入位置见[安装指南](docs/INSTALL.md)。
 
 ### 3. 加载浏览器扩展
 
-获取扩展目录：就是仓库内的 `extension` 子目录，即 `<你的运行时目录>/extension`。
+1. 打开 `chrome://extensions` 或 `edge://extensions`。
+2. 开启开发者模式，选择“加载已解压的扩展程序”。
+3. 选择仓库中的 `extension` 目录，并确认浏览器列出的权限。
 
-然后完成一次浏览器侧加载：
-
-1. Chrome 打开 `chrome://extensions`，Edge 打开 `edge://extensions`。
-2. 开启“开发者模式”。
-3. 点击“加载已解压的扩展程序”。
-4. 选择上面输出的 `extension` 目录。
-
-Chrome / Edge 不允许静默安装未上架扩展，因此这一步需要用户在浏览器中确认。
-加载完成后，扩展会自动连接 `http://127.0.0.1:48887`、维护 controller 心跳并按需
-接入可访问页面。默认不需要填写 token、打开 popup、保存设置或手动刷新页面。
+扩展使用 `debugger` 执行自动化与 CDP，`webRequest` 采集网络诊断，
+`downloads` 读取下载记录。它不接管或重定向下载。完整权限见[安全说明](docs/SECURITY.md)。
 
 ### 4. 验证连接
 
@@ -149,430 +108,220 @@ Chrome / Edge 不允许静默安装未上架扩展，因此这一步需要用户
 npm run doctor
 ```
 
-看到 runtime、Bridge、extension/controller 版本一致后，让 Agent 调用：
+确认包、Bridge、扩展版本一致，controller 在线，并检查已安装 skill 是否与源码一致。
+再让 Agent 执行一次只读验证：
 
 ```text
-yunti_list_browser_targets
+yunti_get_tool_usage_hints → yunti_list_browser_targets
+→ 选择目标页面 → yunti_get_page_snapshot 或 yunti_observe_page
 ```
 
-Agent 应能看到 Chrome / Edge 的可访问标签页，并可直接使用 `tabId`、`targetId` 或
-`browserSessionId` 开始操作。
+默认 Bridge 为 `http://127.0.0.1:48887`，本机模式不要求 token。
+一般不需要打开 popup、保存设置或逐页刷新。
 
-## 更新已安装的版本
+## 更新
 
-源码安装不会自动更新：仓库、正在跑的 bridge 进程、浏览器里的扩展是三份独立的副本，
-要分别刷新。按下面顺序做。
+更新包含三部分：**磁盘源码、MCP server／Bridge 进程、浏览器扩展**。
 
-### 1. 先看你现在是什么版本
-
-```bash
-npm run doctor
-```
-
-它会同时报告**当前包**、**正在运行的 bridge**、**浏览器里加载的扩展**三个版本。
-三者一致才是干净状态；更新前的输出也顺便告诉你运行时目录在哪。
-
-### 2. 更新源码
-
-**用 git 安装的：**
+1. 运行 `npm run doctor`，记录当前包、Bridge、扩展和 skill 状态。
+2. 更新同一个源码目录；Git 安装可执行下列命令，ZIP 安装则将新版本内容覆盖到原目录。
+3. 更新已接入 Agent 的 skill；目标已存在时使用 `--force`。
+4. 核对监听 Bridge 端口的进程及其完整命令行，确认是需要替换的旧 Yunti 进程后再结束它。
+5. 在扩展管理页点击“重新加载”，再开启新的 Agent 会话。
+6. 重新运行 doctor 和只读页面验证，确认新版本实际生效。
 
 ```bash
-cd <你的运行时目录>
-git fetch --tags
+git fetch --tags origin
 git checkout v0.2.9
+node scripts/install-skill.js --harness codex --force
 ```
 
-跟随开发版就跳过 `git checkout`，留在 `main` 分支改用 `git pull`，这样会包含尚未发布的
-改动。checkout 到 tag 后处于 detached HEAD 状态是正常的，下次更新换新 tag 即可。
-
-**用 zip 安装的（没有 git）：**
-
-到 [Releases](https://github.com/BoCodeLab/yunti-browser-runtime/releases) 下载新版的
-`Source code (zip)`，解压后**把里面的内容覆盖到原来的运行时目录**。注意解压出来会多一层
-目录，不要整个套进去 —— MCP 配置里写死的是原目录的绝对路径，目录层级变了 Agent 会找不到
-server。
-
-### 3. 更新后必须做的两件事
-
-只更新源码不生效，下面两处都要做，否则 `npm run doctor` 会报版本不匹配：
-
-1. **重开 Agent 会话** —— 让旧的 MCP server / bridge 进程结束，新会话启动时会以当前版本
-   重新拉起 bridge。
-2. **重新加载浏览器扩展** —— 在 `chrome://extensions` 或 `edge://extensions` 里点本扩展的
-   “重新加载”。源码安装走的是“加载已解压的扩展程序”，扩展不会自己更新。
-
-`npm install` 不需要重跑：运行时（MCP server、本地 Bridge、CLI、扩展）没有第三方依赖，
-只有 `playwright-core` 用于真实浏览器测试，要跑测试时再装一次即可。
-
-### 4. 两步都做完，doctor 仍报版本不匹配
-
-通常是**还有一个旧版本的 bridge 进程占着 `127.0.0.1:48887`**：新会话启动 MCP server 时
-发现端口被占用，会以 proxy 模式连到那个旧进程，版本于是永远停在旧的。这种情况必须先结束
-旧进程，具体命令见下方 FAQ 的「升级后 npm run doctor 仍报 bridge 版本不匹配」。
-
-如果 doctor 报的是协议不匹配（`YUNTI_EXTENSION_PROTOCOL_MISMATCH`），先做第 3 步的重新
-加载扩展，再重试；这一项不匹配时重试浏览器工具是无效的。
+请先保留自己的本地改动。若已切换到发布 tag，处于 detached HEAD 是正常现象；
+后续更新检出新的 tag 即可。运行时目录被移动后，需要重新生成 MCP 配置。
+仅做日常更新无需重新安装开发依赖；要跑测试时按 lockfile 更新依赖。
 
 ## 交给 Agent 安装或更新
 
-不想自己逐步配置时，把下面整段复制给 Agent——它会先判断属于哪种情况，再走对应分支：
+将下方提示词交给你正在使用的 Agent，它会先判断本机状态，再执行对应步骤。
 
 <details>
-<summary><strong>展开安装 / 更新引导提示词</strong></summary>
+<summary><strong>展开安装／更新提示词</strong></summary>
 
 ```text
-请帮我安装或更新 Yunti Browser Runtime。它是一个本地浏览器运行时，让你通过 MCP 操作我本机 Chrome/Edge 页面。
+请帮我安装或更新 Yunti Browser Runtime：
+https://github.com/BoCodeLab/yunti-browser-runtime
 
-先判断属于哪种情况，再走对应分支，不要跳步：
-- 本机还没有它 → 走【首次安装】
-- 已经有（运行时目录里能跑 npm run doctor，或浏览器扩展列表里能看到 Yunti）→ 走【更新】
-
-两种情况都先确认本机有 Node.js 22+ 和 git。
+先判断本机是否已经安装，并检查 Node.js 22+ 与 Git。读取项目安装指南和 packaged skill。
 
 【首次安装】
-1. 让我选一个固定目录放仓库（例如 Windows 的 D:\tools\yunti-browser-runtime，或 macOS/Linux 的 ~/tools/yunti-browser-runtime），不要放进临时目录，然后克隆：
-   git clone https://github.com/BoCodeLab/yunti-browser-runtime.git
-   克隆后 git fetch --tags，检出最新的发布 tag（vX.Y.Z）。不要留在 main，main 可能包含尚未发布的改动。
-   用 zip 装的话，从 Releases 下载 Source code (zip) 解压即可。
-2. 执行 npm install，并告诉我这一步是可选的：运行时（MCP server、本地 Bridge、CLI、浏览器扩展）没有第三方依赖，跳过也能正常使用；装上的 playwright-core 只服务于真实浏览器测试。
-3. 执行 npm run print-config -- --agent <你的 Agent 名称> --human，把输出的 MCP server 配置写入我当前正在用的这个 Agent。
-4. 执行 npm run install-skill -- --harness <你的 Agent 名称> 装上配套 skill。提示目标已存在就加 --force 覆盖——旧 skill 里的恢复规则可能与新版本冲突。你的名称不在 codex / claude-code / cursor / cline / dsh 之内时，改用 --dest <目录>，或把 SKILL.md 内容并入本项目的指令文件。
-5. 告诉我 MCP server 会自动启动本地 Bridge，一般不需要单独运行 npm run bridge。
-6. 告诉我扩展目录是 <运行时目录>/extension。源码安装不注册全局命令，后续命令一律用 npm run <命令>。
-7. 只有“加载已解压的扩展程序”这一步需要我在浏览器里确认：引导我打开 chrome://extensions 或 edge://extensions，开启开发者模式并选择该目录。首次加载时浏览器会列出该扩展申请的权限，请逐项如实说明用途，包括 debugger（浏览器自动化）、webRequest（网络诊断）和 downloads（下载记录报告，只读、不接管下载）。
+1. 选择固定的运行时目录，克隆仓库并检出 GitHub 最新正式发布 tag；不要把 main 当成稳定 tag。
+   没有 Git 时，使用对应 Release 的 Source code (zip)。不要把仓库放进临时目录。
+2. 日常运行不需要第三方依赖；只有开发和浏览器测试才安装开发依赖。
+3. 在仓库目录运行 node scripts/print-config.js --agent <名称> --human，
+   将 MCP server 配置接入我当前使用的 Agent。
+4. 运行 node scripts/install-skill.js --harness <名称> 安装配套 skill。
+   不支持的 Agent 用 --dest <技能目录>，或接入 SKILL.md 内容。已存在的目标先核对再覆盖。
+5. MCP server 会自动启动 Bridge。引导我在浏览器扩展管理页开启开发者模式，
+   加载仓库中的 extension 目录，并说明 debugger、webRequest、downloads 等权限用途。
 
-【更新】这个工具由三份互相独立的副本组成，必须一起刷新——只换源码是不生效的：
-  1) 磁盘上的源码目录  2) 正在运行的 MCP server / Bridge 进程  3) 浏览器里加载的扩展
-1. 先跑 npm run doctor 记录当前状态，把“当前包 / 正在运行的 bridge / 浏览器里加载的扩展”三处版本读给我听。
-2. 更新源码：git 装的用 git fetch --tags 再 git checkout 最新的发布 tag（不要用 git pull 留在 main）；zip 装的重新下载解压并覆盖到原目录。注意解压会多出一层目录，不要整个套进去——MCP 配置里写的是原目录的绝对路径。两种方式都不需要重跑 npm install。
-3. 找出并结束旧的 bridge 进程。这一步不能跳过：只要旧进程还占着 127.0.0.1:48887，新会话启动的 MCP server 就会以 proxy 模式连到它，版本永远停在旧的。Windows 用 netstat -ano | findstr 48887 找 PID，macOS/Linux 用 lsof -ti tcp:48887。
-   结束之前先把 PID 和完整命令行念给我确认——本机可能同时跑着多个 Agent 各自的 MCP server，不要误杀无关进程。
-4. 执行 npm run install-skill -- --harness <你的 Agent 名称> --force 覆盖已装的 skill。旧 skill 的恢复规则可能与新版本冲突，必须覆盖；每个装过 Yunti skill 的 Agent 都各跑一次。
-5. 让我在浏览器里重新加载扩展：chrome://extensions 或 edge://extensions → 找到 Yunti → 点“重新加载”。源码安装的扩展不会自动更新。新版本若新增了权限（例如 0.2.9 增加了 downloads），浏览器会提示我确认，请先说明用途再让我点。
-6. 我重载扩展之后，重开一个新的 Agent 会话，让 MCP server 以新版本重新启动并拉起新 bridge。
+【更新】
+1. 先运行 npm run doctor，记录包、Bridge、扩展、已安装 skill 的状态。
+2. 保存本地改动；Git 安装 fetch tags 后检出最新正式发布 tag，ZIP 安装覆盖到原目录。
+   不要误加一层目录，MCP 配置引用的是原安装目录。
+3. 找出旧 Bridge 的 PID、完整命令行和安装目录；确认确属待更新的 Yunti 进程后再结束它。
+   不要批量终止端口上的进程，也不要误停其他 Agent。
+4. 更新我已接入的 skill；使用 node scripts/install-skill.js --harness <名称> --force。
+5. 引导我重新加载浏览器扩展，并说明新增权限，再开启新的 Agent 会话。
 
-【两种情况都要做】
-- 执行 npm run doctor，确认三处版本一致、扩展显示 connected、Skill 一项显示 differing copies=0。任何一项不对就停下来告诉我，不要反复重启，也不要反复重试浏览器工具。
-- 用只读工具验一次活体：先 yunti_list_browser_targets，再选一个页面调用 yunti_get_page_snapshot 或 yunti_observe_page，确认能读到内容。
-- 在真实操作我的页面之前，先用一段话明确告诉我这个 runtime 会读取哪些数据——页面内容、控制台消息、网络请求、截图、本机学习记忆，以及默认关闭的操作台账——并说明这些数据只经过本机 127.0.0.1 的 Bridge、不会上传到任何远程服务，然后等我确认再继续。
-- 告诉我默认 Bridge URL 是 http://127.0.0.1:48887，本地不需要 token，不需要打开 popup、保存设置或刷新页面。
-
-不要默认要求我刷新页面、切换标签、重启浏览器或填写 token。页面路由异常时先按结构化 recoveryAction 自动恢复，只有浏览器明确阻止注入且自动恢复失败时才请求我处理。不要遗漏 packaged skill 的安装或更新。最后提醒我：运行时目录不要移动或删除，MCP 配置里写的是它的绝对路径。
+【最后验收】
+- 运行 npm run doctor，确认包／Bridge／扩展版本一致、controller 在线、skill 没有差异。
+- 先读取 yunti_get_tool_usage_hints，再列出 targets，选择页面做一次只读观察并验证内容。
+- 操作我的页面前说明可读取的数据、截图和原始 CDP 的敏感信息边界，以及当前 Agent 的模型／日志去向。
+- 默认 Bridge 仅监听 127.0.0.1:48887，本地不需要 token；无需默认打开 popup 或刷新页面。
+- 页面异常时读取结构化 recoveryAction 与共享预算，先自动恢复；仍无法恢复再说明证据。
+- 最后报告实际生效版本、已验证项和待处理项；不要把文件更新成功当成运行时已生效。
 ```
 
 </details>
-
-## 核心能力
-
-### 观察与定位
-
-- 获取全部浏览器实例、标签页和 targets。
-- 读取轻量页面上下文、完整元素快照和可交互 DOM 观察结果。
-- 为每次观察生成独立作用域的 fresh uid，重渲染后旧 uid 不会误命中新元素。
-- 支持开放 Shadow DOM、同源 iframe、滚动容器、深层等待和增量观察。
-- 对网络、控制台、DOM 和学习记忆中的敏感信息进行脱敏。
-
-### 页面操作
-
-- 点击、悬停、输入、批量填表、选择、按键、滚动、拖拽和上传文件。
-- 统一 actionability 与 bounded auto-wait，检查元素是否出现、可见、可编辑和可接收事件。
-- 支持标签页新建、关闭、切换、导航、窗口尺寸和设备仿真。
-- 使用 observe / snapshot / screenshot / evaluate / network / console 验证执行结果。
-
-### CDP 与诊断
-
-- 直接发送 Chrome DevTools Protocol 命令。
-- 覆盖跨域 iframe、Canvas、精确输入、浏览器 targets、仿真和追踪等场景。
-- 捕获脱敏网络请求、控制台消息、CDP events 和性能 trace。
-- Content Script 和 CDP 可按页面能力自由组合，不人为弱化 CDP。
-
-### 稳定恢复
-
-- 每个浏览器或 profile 维护独立 controller，Chrome、Edge 和多 profile 可以同时在线。
-- 页面 session 是 live tab 元数据，不为每个页面创建独立长轮询。
-- 旧 `browserSessionId` 可通过 `tabId` / `targetId` 自动恢复。
-- Edge 睡眠标签页使用有界 probe / injection；必要时短暂激活后恢复原活动标签。
-- 协议或版本不匹配立即失败，`retryBudget=0`，避免 Agent 陷入无效循环。
-- 写操作超时会标记 `resultUncertain`，要求先验证页面状态再决定是否重放。
 
 ## 工作原理
 
 ```mermaid
 flowchart LR
-    A["MCP Agent<br/>Codex · Claude Code · Cursor · Cline"]
-    M["Yunti MCP Server<br/>54 browser tools"]
-    B["Local Bridge<br/>127.0.0.1:48887"]
-    C["Browser Controller<br/>one channel per browser/profile"]
-    P["Chrome / Edge Tabs<br/>existing login and page state"]
-    D["Content Script + CDP<br/>observe · act · diagnose · recover"]
-
-    A <-->|stdio MCP| M
-    M <-->|local HTTP| B
-    B <-->|controller heartbeat and tool queue| C
-    C --> P
-    P <--> D
-    D --> C
+    A["MCP Agent"] <-->|stdio MCP| M["Yunti MCP Server"]
+    M <-->|local HTTP| B["Bridge · 127.0.0.1"]
+    B <-->|工具与结果| C["每个浏览器／profile 的 Controller"]
+    C <--> P["现有 Chrome / Edge 标签页"]
+    P <--> D["Content Script + CDP"]
 ```
 
-所有组件都运行在本机。MCP server 负责工具契约，Bridge 负责路由与诊断，扩展中的
-controller 负责浏览器实例级通信，具体页面由 Content Script 或 CDP 执行动作。
+页面操作遵循 **观察 → 使用最新 uid 操作 → 等待／再次观察 → 验证结果**。
+多步操作可以使用 inventory 返回的 `pageHandleId`；元素 uid 仍只属于产生它的那次观察。
+跨域 iframe、Canvas、浏览器 targets 或精确输入等场景可使用 CDP。
 
-### Agent 推荐工作流
+失败时读取 `code`、`retryable`、`retryBudget`、`recoveryAction` 和 `resultUncertain`。
+整个恢复链共享一个预算；可能已完成的写操作先核对状态，再决定下一步。
+Edge 睡眠标签页会尝试有界恢复，Agent 不应默认要求用户刷新、切换标签或重启浏览器。
 
-```text
-get_tool_usage_hints
-        ↓
-list_browser_targets → 选择目标浏览器与页面
-        ↓
-observe_page → 获取 fresh uid 与页面状态
-        ↓
-click / fill / select / scroll / CDP
-        ↓
-observe / wait / screenshot / network / console → 验证结果
-```
-
-失败时读取 `code`、`retryable`、`retryBudget`、`recoveryAction` 和
-`resultUncertain`。整个恢复链共享一个预算，不重复使用已失效的 session，也不在
-写操作结果不确定时盲目重放。
-
-## 工具概览
-
-| 类别 | 代表工具 |
-| --- | --- |
-| Targets | `yunti_list_browser_targets`, `yunti_get_browser_target`, `yunti_select_page` |
-| Observe | `yunti_observe_page`, `yunti_find_elements`, `yunti_get_page_snapshot`, `yunti_take_snapshot` |
-| Actions | `yunti_click`, `yunti_fill`, `yunti_fill_form`, `yunti_select`, `yunti_scroll`, `yunti_drag` |
-| Lifecycle | `yunti_new_page`, `yunti_close_page`, `yunti_navigate_page`, `yunti_wait_for` |
-| Diagnostics | `yunti_take_screenshot`, `yunti_list_network_requests`, `yunti_list_console_messages` |
-| CDP | `yunti_cdp_send_command`, `yunti_cdp_detach`, `yunti_get_cdp_events` |
-| Memory | `yunti_remember_learning`, `yunti_get_learning_memory`, `yunti_forget_learning_memory` |
-
-[查看全部工具、参数规则和最小用例](docs/TOOL_GUIDE.md)
-
-## CLI
-
-命令入口是 `bin/yunti-browser-runtime.js`，源码安装统一通过 npm scripts 调用：
-
-```bash
-node bin/yunti-browser-runtime.js --help
-npm run doctor
-npm run print-config -- --agent codex --human
-npm run bridge
-npm run console
-npm run package:extension
-npm run test:soak
-```
-
-| 命令 | 用途 |
-| --- | --- |
-| `npm run doctor` | 检查 Node、Bridge、扩展、协议和浏览器 controller |
-| `npm run print-config` | 输出目标 Agent 的 MCP 配置与 skill 安装指引 |
-| `npm run bridge` | 独立启动本地 Bridge，通常只用于调试 |
-| `npm run console` | 启动 Bridge 并显示可选的脱敏本地运行状态页 |
-| `npm run package:extension` | 生成版本化扩展 zip |
-| `npm run test:soak` | 运行至少 15 分钟的全工具浏览器耐久测试 |
+[查看全部 54 个工具、参数与用例](docs/TOOL_GUIDE.md) ·
+[查看 Agent 工作流契约](docs/AGENT_WORKFLOW_CONTRACT.md)
 
 ## 安全与隐私
 
-- 默认 Bridge 仅绑定 `127.0.0.1:48887`，本地模式不要求 token。
-- 只有显式绑定非 loopback 地址时才强制要求 Bridge token。
-- 不返回原始 cookie、Authorization header、密码或疑似 token 字段。
-- 网络日志、请求体预览、DOM 观察和学习记忆均包含脱敏策略。
-- 提交、删除、购买、发布、生产数据修改或敏感文件上传等操作应由 Agent 先获得确认。
-- CDP 调试横幅只是 Chrome 的运行状态提示；权限判断基于动作影响，而不是使用的后端。
+Yunti 默认使用本机 Bridge，不依赖项目托管的云端中继或平台账号。
+**工具结果会交给你接入的 Agent；其模型服务、遥测和日志是否上传数据，由该 Agent 的配置决定。**
 
-### 接入 Agent 后它会读到什么
+| 数据 | 默认处理与边界 |
+| --- | --- |
+| DOM 观察 | 默认 `balanced` 脱敏；需要隐藏更多个人信息时使用 `strict` |
+| 网络与控制台诊断 | 使用脱敏规则过滤敏感字段与常见凭据；规则无法保证识别所有秘密 |
+| 截图 | 返回真实页面像素，可能包含账号、消息或其他敏感内容 |
+| 原始 CDP、脚本求值、trace | 可能返回未脱敏内容；按需使用，分享前检查，调试后清理缓冲 |
+| 下载记录 | 包含本地文件路径与下载状态；来源 URL 去除查询串；不读取下载文件内容 |
+| 学习记忆 | 写入本机 Yunti 数据目录；不要主动保存凭据或个人敏感资料 |
+| 操作台账 | 默认关闭；`YUNTI_BROWSER_LEDGER=1` 启用后仅保存调用元数据、参数键名与指纹 |
 
-把 runtime 交给 Agent 之前，你应该知道它能读到什么、数据去了哪里。
+- Bridge 默认仅监听 `127.0.0.1`；设置 `YUNTI_BROWSER_BRIDGE_TOKEN` 可启用本地认证，
+  绑定非 loopback 地址时必须提供 token。不要把 token 写进仓库或提交示例。
+- 扩展有广泛的 HTTP／HTTPS 页面访问权限；只从可信源码加载，也可在 popup 配置页面匹配范围。
+- 提交、删除、购买、发布、生产数据修改和敏感文件上传，应由 Agent 根据影响取得用户授权。
+- 本地凭据、日志、截图、浏览器 profile 和测试产物应保留在 Git 忽略的目录中。
 
-| 读取项 | 内容 | 去向 |
-| --- | --- | --- |
-| 页面内容 | DOM 结构、可见文本、元素属性；输入框的值默认以 `valueRedacted` 返回 | 仅本机 Bridge |
-| 控制台消息 | 页面 console 输出，按脱敏规则过滤后才返回 | 仅本机 Bridge |
-| 网络请求 | URL、方法、状态码、耗时与脱敏后的请求体预览；不返回 cookie 与 Authorization | 仅本机 Bridge |
-| 截图 | 可见像素，可能包含敏感内容 | 仅本机 Bridge |
-| 学习记忆 | `~/.yunti_agent/` 下的本地 JSON 文件 | 仅本机文件系统 |
-| 下载记录 | 浏览器下载项的文件名（绝对本地路径）、来源 URL、状态、字节数与错误；来源 URL 的查询串会被剥掉。下载**不会被重定向**，文件仍在浏览器自己的下载目录 | 仅本机 Bridge |
-| 操作台账（**默认关闭**） | 工具名、耗时、结果状态、使用了哪类路由字段、参数**键名**与一个单向哈希；不含参数值、页面正文或凭据。设置 `YUNTI_BROWSER_LEDGER=1` 后才写入 `~/.yunti_agent/operations/YYYY-MM-DD.jsonl` | 仅本机文件系统 |
-
-**不会发生的事**：不上传数据到远程服务、不需要平台账号、不写远程日志。Bridge 默认只监听
-`127.0.0.1`；需要更严格的边界时设置 `YUNTI_BROWSER_BRIDGE_TOKEN`，并在扩展 popup 里
-填入同一个 token。
-
-Agent 也会读到**非实时**的数据（工具说明、本地记忆、扩展采集缓冲）。这类返回会带上
-`dataFreshness` 标注，避免 Agent 把缓冲当成页面当前状态 —— 详见
-[工具指南的数据新鲜度一节](docs/TOOL_GUIDE.md)。
-
-[查看权限、数据边界与威胁模型](docs/SECURITY.md)
-
-## 可靠性演进
-
-- **0.2.6**：38/38 复杂场景 benchmark、观察作用域 uid、同源 iframe / 开放
-  Shadow DOM 深层等待、Shadow DOM 坐标操作，以及 Edge p95 / 最大延迟门禁。
-- **0.2.5**：协议与 live version 门禁、多浏览器实例隔离、跨实例 tabId 路由、统一
-  重试预算、新标签页 ready contract，以及 15 分钟全工具耐久测试。
-- **0.2.4**：Edge 睡眠标签页恢复、有界消息与注入、poll watchdog；Agent
-  不应默认要求用户刷新、切换标签或重启 Edge。
-- **0.2.3**：每个浏览器实例收敛为一条 controller transport，旧 session 和页面路由
-  可按 target 自动恢复，CDP 恢复为一等后端。
-- **0.2.2**：扩展在线状态从“必须存在页面 session”调整为浏览器级 controller 心跳。
-- **0.2.0**：observe-first、fresh uid、结构化恢复诊断、数据脱敏和可选本地控制台。
-
-[查看当前状态](docs/PROJECT_STATUS.md) · [查看路线图](docs/ROADMAP.md) ·
-[查看 Page Agent / browser-use 竞品研究](docs/COMPETITOR_RESEARCH_2026.md)
+完整权限、脱敏范围和限制见[安全说明](docs/SECURITY.md)。
 
 ## 开发与验证
 
 ```bash
-git clone https://github.com/BoCodeLab/yunti-browser-runtime.git
-cd yunti-browser-runtime
-npm install
-npm test
-npm run release:check
-```
-
-真实浏览器短 E2E：
-
-```bash
+npm ci
 npx playwright-core install chromium
-YUNTI_E2E=1 npm run test:e2e
 ```
 
-`playwright-core install` 对单次请求设了 30 秒上限，国内网络下经常直接超时。
-遇到时可以改用支持长连接的下载方式手动安装，步骤见
-[耐久测试文档的安装章节](docs/SOAK_TEST.md)。真实浏览器测试会弹出一个独立的
-Chromium 窗口，它使用临时 profile，不会影响你正在使用的浏览器。
+运行真实浏览器测试前设置环境变量：
 
-浏览器交互语义测试（在真实浏览器里断言 click / fill / select / scroll / dialog 的实际页面效果）：
-
-```bash
-YUNTI_E2E=1 npm run test:interactions
+```powershell
+# PowerShell
+$env:YUNTI_E2E = "1"
 ```
 
-`npm test` 默认跳过它 —— 它需要一个 Chromium 和可见窗口，只在显式设置 `YUNTI_E2E=1`
-时运行。与 `test:e2e`（验证整条链路通不通）不同，这个文件验证的是**动作语义对不对**：
-点击是否真的触发了页面处理函数、填入的值是否留在控件里、滚到底部是否给出结构化诊断、
-原生弹窗是否会让标签页卡死。
+```bash
+# macOS / Linux
+export YUNTI_E2E=1
+```
 
-完整 15 分钟耐久测试：
+随后运行：
 
 ```bash
+npm run test:interactions
+npm run test:e2e
+npm run release:check
 npm run test:soak
 ```
 
-短跑只用于开发 runner，不可作为发布证据：
+`release:check` 包含全套 `npm test`、语法、版本、文档链接与打包检查。
+没有 `YUNTI_E2E=1` 时，`npm test` 会跳过真实浏览器文件；验收必须同时满足 **fail 0、skipped 0**。
+耐久测试使用独立的可见 Chromium 窗口，至少连续运行 15 分钟；要求全部工具覆盖、
+零失败、零重复写入、P95 ≤ 500 毫秒、单次最长 ≤ 10 秒。
+
+开发测试脚本时可短跑，但不可作为正式验收证据：
 
 ```bash
-npm run test:soak -- --duration-seconds=180 --allow-short
+node scripts/soak-test.js --duration-seconds=180 --allow-short
 ```
 
-`npm run release:check` 会检查公开文档、本地残留、版本一致性、CLI、doctor、语法、
-全部单元测试、npm 包内容和扩展 zip 内容。
+浏览器下载受网络限制时，参考[浏览器准备与手动安装](docs/SOAK_TEST.md)。
+测试产物写入 `.artifacts/`，不要提交原始日志、截图或本机路径。
 
-## 文档导航
+## 常见问题
+
+<details>
+<summary><strong>已加载扩展，为什么仍提示版本不一致？</strong></summary>
+
+doctor 检查的是包、正在运行的 Bridge 和浏览器扩展三处版本。旧 Bridge 仍占用端口时，
+新的 MCP server 可能代理到旧进程。核对 PID、命令行与安装目录后，仅结束对应的旧 Yunti
+进程，再重载扩展、开启新 Agent 会话。不要按端口直接批量终止进程。
+
+</details>
+
+<details>
+<summary><strong>页面不可操作或旧 session 失效怎么办？</strong></summary>
+
+先读取结构化恢复字段，重新列出 targets，使用明确的页面路由并遵守返回的重试预算。
+普通 HTTP／HTTPS 标签页支持自动路由恢复；浏览器内置页、其他扩展页和策略禁止访问的
+页面有额外限制。页面超时本身不代表整个浏览器离线。
+
+</details>
+
+<details>
+<summary><strong>PowerShell 下 npm 带参数命令报 Unknown cli flags？</strong></summary>
+
+可以直接调用相同的 Node 入口，例如 `node scripts/print-config.js --agent codex --human`，
+避免 shell 或 npm 版本对 `--` 的解析差异。无需全局安装 CLI。
+
+</details>
+
+## 文档
 
 | 文档 | 内容 |
 | --- | --- |
-| [安装指南](docs/INSTALL.md) | Codex、Claude Code、Cursor、Cline 接入与故障恢复 |
-| [工具指南](docs/TOOL_GUIDE.md) | 工具列表、参数、路由规则和操作用例 |
-| [Agent 工作流契约](docs/AGENT_WORKFLOW_CONTRACT.md) | Agent 的默认操作、确认和恢复策略 |
-| [P8 稳定页面句柄计划](docs/STABLE_PAGE_HANDLE_PLAN.md) | 标签页长期身份、session 内部恢复与验收契约 |
-| [15 分钟耐久测试](docs/SOAK_TEST.md) | 复杂 fixture、覆盖契约、产物与通过标准 |
-| [安全说明](docs/SECURITY.md) | 权限、隐私、数据脱敏和本地边界 |
-| [0.2.9 发布说明](docs/RELEASE_0_2_9.md) | 当前版本目标、实现与验收 |
-| [项目状态](docs/PROJECT_STATUS.md) | 阶段总览、实测证据和后续工作 |
-| [路线图](docs/ROADMAP.md) | 后续版本与能力规划 |
-| [发布手册](docs/RELEASE.md) | npm 发布、扩展打包与发布后验证 |
-
-## FAQ
-
-<details>
-<summary><strong>安装扩展后为什么不需要刷新每个页面？</strong></summary>
-
-扩展先注册浏览器级 controller，并通过 tab inventory 发现可访问页面。页面操作到来时，
-runtime 会使用 `tabId` / `targetId` 建立或恢复具体页面路由。普通 `http` / `https` 页面
-不需要用户逐页刷新；浏览器内置页、扩展页和策略禁止注入的页面不在可操作范围内。
-
-</details>
-
-<details>
-<summary><strong>为什么本地默认不需要 token？</strong></summary>
-
-Bridge 默认只监听 `127.0.0.1`。共享机器加固或自定义网络部署可以设置
-`YUNTI_BROWSER_BRIDGE_TOKEN`；绑定非 loopback 地址时 token 为必需项。
-
-</details>
-
-<details>
-<summary><strong>为什么同时保留 Content Script 和 CDP？</strong></summary>
-
-DOM 页面适合 fresh uid 与语义动作；跨域 frame、Canvas、浏览器 target、精确输入、
-仿真和性能追踪更适合 CDP。两种后端互补，Agent 应选择成功率和可验证性更高的路径。
-
-</details>
-
-<details>
-<summary><strong>旧 browserSessionId 失效怎么办？</strong></summary>
-
-先读取结构化恢复字段，丢弃旧 ID，然后最多列出一次 targets，并通过目标页的 `tabId`
-或 `targetId` 进行一次有预算的恢复。页面超时不代表 controller 或整个浏览器离线。
-
-</details>
-
-<details>
-<summary><strong>移动克隆目录后 Agent 报找不到 server</strong></summary>
-
-`print-config` 生成的 MCP 配置保存的是仓库目录的绝对路径。移动或重命名目录后，重新
-执行 `npm run print-config -- --agent <你的Agent> --human`，用新输出替换 Agent 的 MCP
-配置即可。
-
-</details>
-
-<details>
-<summary><strong>Windows 上 npm run bridge 报环境变量错误</strong></summary>
-
-早期版本的 npm script 使用 POSIX 前置环境变量语法，在 cmd.exe 下无法解析。当前版本
-已改为跨平台的 `node scripts/bridge.js`。若仍报错，先 `git pull` 到最新版本。
-
-</details>
-
-<details>
-<summary><strong>升级后 npm run doctor 仍报 bridge 版本不匹配</strong></summary>
-
-`doctor` 会对比三处版本：当前包、正在运行的 bridge、浏览器里加载的扩展。如果重开了
-Agent 会话、也重新加载了扩展，版本却还停在旧的，通常是**还有一个旧版本的 bridge
-进程占着 `127.0.0.1:48887`**。新会话启动 MCP server 时发现端口被占用，会以 proxy
-模式连到那个旧进程，于是版本永远不更新 —— 这时必须先结束旧进程。
-
-Windows：
-
-```powershell
-Get-NetTCPConnection -LocalPort 48887 -State Listen |
-  Select-Object -ExpandProperty OwningProcess -Unique |
-  ForEach-Object { Stop-Process -Id $_ -Force }
-```
-
-macOS / Linux：
-
-```bash
-kill $(lsof -ti tcp:48887)
-```
-
-然后重开 Agent 会话，新的 MCP server 会以 owner 模式启动并加载当前版本。再跑
-`npm run doctor` 确认三处版本一致。
-
-</details>
+| [安装指南](docs/INSTALL.md) | Agent 接入、配置与故障恢复 |
+| [工具指南](docs/TOOL_GUIDE.md) | 54 个工具、参数、路由与使用示例 |
+| [Agent 工作流](docs/AGENT_WORKFLOW_CONTRACT.md) | 操作、验证、授权与恢复 |
+| [稳定页面句柄](docs/STABLE_PAGE_HANDLE_PLAN.md) | 页面身份与生命周期契约 |
+| [安全说明](docs/SECURITY.md) | 权限、数据处理与边界 |
+| [耐久测试](docs/SOAK_TEST.md) | 本地复现、验收标准与产物 |
+| [0.2.9 发布说明](docs/RELEASE_0_2_9.md) | 版本能力与兼容性变化 |
+| [项目状态](docs/PROJECT_STATUS.md) | 实测证据与阶段进展 |
+| [路线图](docs/ROADMAP.md) | 后续计划 |
+| [发布手册](docs/RELEASE.md) | 构建、发布与发布后验证 |
 
 ## 参与项目
 
-欢迎提交 Issue、可复现 fixture、浏览器兼容性证据和 Pull Request。涉及新工具或行为
-修改时，请同时补充工具契约、测试、Agent 指引，并确保 15 分钟 soak coverage 不会
-遗漏新增公开工具。
+欢迎提交 [Issue](https://github.com/BoCodeLab/yunti-browser-runtime/issues) 和 Pull Request。
+请附上版本、浏览器、复现步骤、预期结果和脱敏后的实际结果；不要公开访问令牌、
+cookie、原始 CDP／网络载荷或带个人信息的截图。新增工具或行为变化请同步补充契约、
+测试与耐久覆盖，提交前运行发布门禁。
 
-- [贡献指南](CONTRIBUTING.md)：提交信息规范与提交前检查
-- [报告问题](https://github.com/BoCodeLab/yunti-browser-runtime/issues)
-- [项目初衷](docs/PROJECT_INTENT.md)
-- [执行计划](docs/EXECUTION_PLAN.md)
+详见[贡献指南](CONTRIBUTING.md)与[项目初衷](docs/PROJECT_INTENT.md)。
 
 ## License
 
